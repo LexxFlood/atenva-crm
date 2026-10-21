@@ -1,0 +1,14 @@
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+.env
+.env.*
+!.env.example
+
+.gcloud-config/
+.vercel/
+node_modules/
+
+.whatsapp-verify.tmp
+deploy/evolution/tunnel-logs/

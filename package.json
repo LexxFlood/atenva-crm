@@ -1,0 +1,19 @@
+{
+  "name": "whatscrm-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CRM WhatsApp-first com agente de IA autónomo e supervisão humana",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node src/seed.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "read-excel-file": "^6.0.1"
+  }
+}

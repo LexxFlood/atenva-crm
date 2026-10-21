@@ -1,0 +1,11 @@
+crm.cliente.com {
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:3210
+
+  log {
+    output file /var/log/caddy/verde-crm-access.log {
+      roll_size 10mb
+      roll_keep 5
+    }
+  }
+}

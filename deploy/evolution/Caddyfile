@@ -1,0 +1,21 @@
+{$EVOLUTION_DOMAIN} {
+  encode zstd gzip
+
+  @allowedOrigins header Origin https://atenva.vercel.app
+  header @allowedOrigins Access-Control-Allow-Origin "https://atenva.vercel.app"
+  header @allowedOrigins Access-Control-Allow-Credentials "true"
+
+  reverse_proxy evolution:8080 {
+    health_uri /
+    health_interval 30s
+    transport http {
+      dial_timeout 10s
+      response_header_timeout 60s
+    }
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}

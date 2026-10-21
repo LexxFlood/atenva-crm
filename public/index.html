@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      if (window.location.protocol === 'file:') window.location.replace('http://localhost:3210/');
+    </script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f8f3" />
+    <meta name="description" content="Atenva · Plataforma de conversão relacional com CRM, WhatsApp e inteligência artificial." />
+    <script>
+      document.documentElement.dataset.theme = localStorage.getItem('atenva-theme') || 'light';
+    </script>
+    <title>Atenva · Plataforma de conversão relacional</title>
+    <link rel="stylesheet" href="/styles.css?v=20261012.28" />
+  </head>
+  <body>
+    <section class="app-boot" id="app-boot" aria-live="polite">
+      <img class="brand-mark-image" src="/assets/atenva-mark-green.png" alt="" />
+      <strong>Atenva</strong>
+      <p id="app-boot-message">Abrindo seu ambiente…</p>
+      <span class="app-boot-loader" aria-hidden="true"></span>
+      <button class="ghost-button" id="retry-bootstrap" type="button" hidden>Tentar novamente</button>
+    </section>
+    <section class="login-screen" id="login-screen" hidden>
+      <div class="login-visual">
+        <div class="login-brand"><img class="brand-mark-image" src="/assets/atenva-mark-green.png" alt="" /><strong>Atenva <small>CRM IA</small></strong></div>
+        <div class="login-copy"><span class="login-pill"><i></i> IA trabalhando agora</span><h1>Conversas que<br />viram negócios.</h1><p>WhatsApp, CRM e inteligência artificial no mesmo fluxo, com sua equipe sempre no controle.</p></div>
+        <div class="login-proof"><div class="proof-avatars"><span>AM</span><span>LR</span><span>IA</span></div><p><strong>Atendimento contínuo</strong><small>A Atenva qualifica enquanto sua equipe vende.</small></p></div>
+      </div>
+      <div class="login-panel">
+        <button class="theme-toggle login-theme-toggle" id="login-theme-toggle" type="button" aria-label="Ativar modo escuro" title="Alternar tema"><i data-icon="moon"></i></button>
+        <form class="login-card" id="login-form">
+          <p class="overline">Acesso seguro</p>
+          <h2 id="login-title">Bem-vindo de volta</h2>
+          <p id="login-description">Entre para acompanhar suas conversas e oportunidades.</p>
+          <div class="login-error" id="login-error" hidden></div>
+          <label>E-mail<input type="email" name="email" autocomplete="username" required /></label>
+          <label>Senha<span class="password-field"><input type="password" name="password" autocomplete="current-password" required /><button type="button" id="toggle-password" aria-label="Mostrar senha">Mostrar</button></span></label>
+          <button type="submit" class="login-button">Entrar com segurança <i data-icon="arrow"></i></button>
+          <small class="demo-hint" id="demo-hint" hidden>Credenciais de demonstração preenchidas automaticamente.</small>
+        </form>
+        <form class="login-card" id="invite-accept-form" hidden>
+          <p class="overline">Convite para a Atenva</p>
+          <h2>Crie seu acesso</h2>
+          <p id="invite-description">Finalize seu cadastro para entrar na empresa.</p>
+          <div class="login-error" id="invite-error" hidden></div>
+          <label>Nome completo<input name="name" autocomplete="name" required /></label>
+          <label>E-mail<input name="email" type="email" readonly /></label>
+          <label>Crie uma senha<input name="password" type="password" minlength="10" autocomplete="new-password" required /></label>
+          <button type="submit" class="login-button">Aceitar convite <i data-icon="arrow"></i></button>
+          <button type="button" class="link-button" id="back-to-login">Voltar para o login</button>
+        </form>
+      </div>
+    </section>
+
+    <div class="app-shell" id="app-shell" hidden>
+      <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="Fechar menu" hidden></button>
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <img class="brand-mark-image" src="/assets/atenva-mark-green.png" alt="" />
+          <div><strong>Atenva</strong><small>CRM IA</small></div>
+          <button class="sidebar-collapse" id="sidebar-collapse" type="button" aria-label="Recolher menu lateral" title="Recolher menu lateral"><i data-icon="chevron"></i></button>
+        </div>
+
+        <div class="company-profile-area">
+          <button class="profile-card company-profile-card" id="profile-menu-button" aria-haspopup="true" aria-expanded="false">
+            <span class="avatar avatar-dark" id="profile-company-avatar">AT</span>
+            <span><small id="profile-context-label">Perfil da empresa</small><strong id="profile-name">Atenva</strong><small id="profile-role">Perfil atual</small></span>
+            <i data-icon="chevron"></i>
+          </button>
+          <div class="profile-popover" id="profile-popover" hidden><div id="company-switcher" class="company-switcher"></div><button id="new-company-button" class="profile-neutral"><i data-icon="plus"></i>Cadastrar novo cliente</button><button id="text-size-button" class="profile-neutral"><i data-icon="settings"></i>Configurações de leitura</button><button id="logout-button"><i data-icon="arrow"></i>Terminar sessão</button></div>
+        </div>
+
+        <nav class="main-nav" aria-label="Navegação principal">
+          <button class="nav-item active" data-view="overview"><i data-icon="home"></i><span>Visão geral</span></button>
+          <button class="nav-item" data-view="inbox"><i data-icon="message"></i><span>Conversas</span><b id="nav-unread">0</b></button>
+          <button class="nav-item" data-view="pipeline"><i data-icon="pipeline"></i><span>Funis</span></button>
+          <button class="nav-item" data-view="qualification"><i data-icon="trend"></i><span>Insights</span></button>
+          <button class="nav-item" data-view="contacts"><i data-icon="users"></i><span>Contatos</span></button>
+          <button class="nav-item" data-view="relationships"><i data-icon="link"></i><span>Relacionamento</span></button>
+          <button class="nav-item" data-view="tasks"><i data-icon="calendar"></i><span>Tarefas</span></button>
+          <button class="nav-item" data-view="campaigns"><i data-icon="send"></i><span>Disparos</span></button>
+          <div class="nav-label">Inteligência</div>
+          <button class="nav-item" data-view="agent"><i data-icon="spark"></i><span id="agent-nav-name">Agente Atenva</span><em>Ativo</em></button>
+          <button class="nav-item" data-view="knowledge"><i data-icon="book"></i><span>Conhecimento</span></button>
+          <button class="nav-item" data-view="meta-ads"><i data-icon="chart"></i><span>Meta Ads</span></button>
+          <button class="nav-item" data-view="meta"><i data-icon="meta"></i><span>Integrações</span></button>
+          <button class="nav-item admin-only" data-view="administration"><i data-icon="settings"></i><span>Administração</span></button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="sidebar-user"><span class="avatar avatar-dark" id="sidebar-user-avatar">AM</span><span><strong id="sidebar-user-name">Ana Martins</strong><small id="sidebar-user-role">Administradora</small></span></div>
+          <button class="sidebar-logout-button" id="sidebar-logout-button" type="button" title="Sair da Atenva"><i data-icon="arrow"></i><span>Sair da conta</span></button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Abrir menu"><i data-icon="menu"></i></button>
+          <div class="topbar-title"><span id="eyebrow">Sábado, 22 de agosto</span><h1 id="page-title">Visão geral</h1></div>
+          <div class="topbar-actions">
+            <button class="ghost-button tour-launch" id="system-tour-button"><i data-icon="spark"></i><span>Tour guiado</span></button>
+            <button class="search-button" id="global-search"><i data-icon="search"></i><span>Pesquisar</span><kbd>⌘ K</kbd></button>
+            <button class="icon-button theme-toggle" id="theme-toggle" type="button" aria-label="Ativar modo escuro" title="Alternar tema"><i data-icon="moon"></i></button>
+            <div class="notification-wrap">
+              <button class="icon-button" id="notification-button" type="button" aria-label="Notificações" aria-expanded="false" aria-controls="notification-panel"><i data-icon="bell"></i><span class="notification-dot" id="notification-badge" hidden></span></button>
+              <aside class="notification-panel" id="notification-panel" hidden aria-label="Central de notificações">
+                <header><div><strong>Notificações</strong><span>Pendências que precisam da sua atenção</span></div><button type="button" id="close-notifications" aria-label="Fechar notificações"><i data-icon="x"></i></button></header>
+                <div class="notification-list" id="notification-list"><p class="notification-loading">Carregando notificações…</p></div>
+              </aside>
+            </div>
+          </div>
+        </header>
+
+        <section class="view active" id="view-overview"></section>
+        <section class="view inbox-view" id="view-inbox"></section>
+        <section class="view" id="view-pipeline"></section>
+        <section class="view" id="view-qualification"></section>
+        <section class="view" id="view-contacts"></section>
+        <section class="view" id="view-relationships"></section>
+        <section class="view" id="view-tasks"></section>
+        <section class="view" id="view-campaigns"></section>
+        <section class="view" id="view-agent"></section>
+        <section class="view" id="view-knowledge"></section>
+        <section class="view" id="view-meta-ads"></section>
+        <section class="view" id="view-meta"></section>
+        <section class="view" id="view-administration"></section>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="knowledge-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="knowledge-modal-title">
+        <button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon"><i data-icon="book"></i></div>
+        <p class="overline">Fonte aprovada</p>
+        <h2 id="knowledge-modal-title">Novo conhecimento</h2>
+        <p>O agente usará este conteúdo para responder clientes. Escreva informações claras e verificadas.</p>
+        <form id="knowledge-form">
+          <input type="hidden" name="id" />
+          <label>Título<input name="title" placeholder="Ex.: Política de cancelamento" required /></label>
+          <label>Contexto livre<input name="category" list="knowledge-context-options" placeholder="Ex.: Negociação, Onboarding ou Objeção de preço" required /><small>Use qualquer contexto que faça sentido para o seu processo; não há categorias obrigatórias.</small></label>
+          <datalist id="knowledge-context-options"><option value="Toda a jornada comercial"><option value="Entrada e abordagem"><option value="Qualificação"><option value="Negociação"><option value="Fechamento"><option value="Follow-up"><option value="Objeções"><option value="Oferta e serviços"></datalist>
+          <label>Conteúdo<textarea name="content" rows="6" required></textarea></label>
+          <label>Prioridade da fonte<input name="priority" type="number" min="0" max="100" value="50" /><small>Fontes com maior prioridade prevalecem quando houver conflito.</small></label>
+          <label class="automation-toggle"><input name="is_authoritative" type="checkbox" /><span><strong>Fonte oficial</strong><small>Use para políticas, preços e regras que devem prevalecer.</small></span></label>
+          <label>Ou anexar playbook (.txt, .md ou .csv)<input type="file" name="playbook" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" /></label>
+          <div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button" id="knowledge-submit">Salvar fonte</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="task-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+        <button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon"><i data-icon="calendar"></i></div>
+        <p class="overline">Próxima ação</p><h2 id="task-modal-title">Nova tarefa</h2>
+        <p>Crie um compromisso e atribua a alguém da equipe.</p>
+        <form id="task-form">
+          <input type="hidden" name="task_id" /><input type="hidden" name="contact_id" /><input type="hidden" name="conversation_id" /><input type="hidden" name="deal_id" />
+          <label>Título<input name="title" placeholder="Ex.: Retornar proposta" required /></label>
+          <div class="form-grid-two task-schedule-fields"><label>Data<input name="due_date" type="date" required /></label><label>Horário<input name="due_time" type="time" required /></label></div>
+          <label>Responsável<select name="assigned_to" id="task-assignee" required></select></label>
+          <label>Prioridade<select name="priority"><option value="urgent">Urgente</option><option value="high">Alta</option><option value="normal" selected>Média</option><option value="low">Baixa</option></select></label>
+          <label>Tipo<select name="type"><option value="followup">Follow-up</option><option value="meeting">Reunião</option><option value="call">Ligação</option><option value="other">Outro</option></select></label>
+          <label>Descrição<textarea name="description" rows="3"></textarea></label>
+          <div class="modal-actions"><button type="button" class="danger-outline" id="delete-task" hidden>Excluir</button><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button" id="task-submit">Criar tarefa</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="pipeline-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon"><i data-icon="pipeline"></i></div><p class="overline">Novo fluxo</p><h2>Criar funil</h2><p>Separe processos comerciais, onboarding ou qualquer outro fluxo.</p>
+        <form id="pipeline-form"><label>Nome<input name="name" placeholder="Ex.: Parcerias" required /></label><label>Etapas<textarea name="stages" rows="3" placeholder="Entrada, Negociação, Concluído"></textarea></label><div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Criar funil</button></div></form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="deal-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="deal-modal-title">
+        <button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon"><i data-icon="pipeline"></i></div>
+        <p class="overline">Nova oportunidade</p><h2 id="deal-modal-title">Criar novo negócio</h2>
+        <p>Adicione uma oportunidade ao funil e acompanhe a evolução pelo card.</p>
+        <form id="deal-form">
+          <label>Nome do negócio<input name="title" maxlength="160" placeholder="Ex.: Campanha de lançamento" required /></label>
+          <label>Contato existente<select name="contact_id" id="deal-contact"></select></label>
+          <div class="quick-contact-fields" id="new-deal-contact-fields">
+            <div class="quick-contact-heading"><strong>Novo lead (opcional)</strong><span>Você pode criar o negócio agora e completar os dados da pessoa depois</span></div>
+            <div class="form-grid-two"><label>Nome<input name="contact_first_name" maxlength="70" placeholder="Nome" /></label><label>Sobrenome<input name="contact_last_name" maxlength="70" placeholder="Sobrenome" /></label></div>
+            <div class="form-grid-two"><label>WhatsApp ou telefone<input name="contact_phone" maxlength="30" placeholder="(11) 99999-9999" /></label><label>E-mail<input name="contact_email" type="email" maxlength="160" placeholder="nome@empresa.com" /></label></div>
+            <label>Rede social do contato<input name="contact_social" maxlength="240" placeholder="@usuario ou link do perfil" /></label>
+            <div class="form-grid-two"><label>Canal de origem<select name="contact_source"><option value="manual">Cadastro manual</option><option value="whatsapp">WhatsApp</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="meta_ads">Meta Ads</option><option value="google_ads">Google Ads</option><option value="indicacao">Indicação</option><option value="organico">Orgânico</option><option value="outro">Outro</option></select></label><label>Temperatura do lead<select name="lead_temperature"><option value="cold">Frio</option><option value="warm" selected>Morno</option><option value="hot">Quente</option></select></label></div>
+            <label>Tags<input name="contact_tags" maxlength="240" placeholder="Ex.: Inbound, Produtora" /><small>O canal de origem e a temperatura também viram tags automáticas.</small></label>
+            <details class="lead-extra-fields" open><summary>Dados da empresa</summary><label>Nome da empresa<input name="contact_company" maxlength="120" placeholder="Razão social ou nome fantasia" /></label><div class="form-grid-two"><label>Telefone da empresa<input name="company_phone" maxlength="30" placeholder="(11) 3333-4444" /></label><label>E-mail da empresa<input name="company_email" type="email" maxlength="160" placeholder="contato@empresa.com" /></label></div><label>Redes sociais da empresa<input name="company_socials" maxlength="300" placeholder="Instagram, Facebook, LinkedIn…" /></label><div class="form-grid-two"><label>Segmento<select name="contact_segment"><option value="">Selecione…</option><option>Marketing e publicidade</option><option>Produção audiovisual</option><option>Eventos</option><option>Saúde</option><option>Educação</option><option>Varejo e e-commerce</option><option>Serviços</option><option>Tecnologia</option><option>Imobiliário</option><option>Alimentação</option><option>Indústria</option><option>Outro</option></select></label><label>Site<input name="company_website" type="url" maxlength="240" placeholder="https://empresa.com.br" /></label></div></details>
+            <details class="lead-extra-fields"><summary>Mais informações comerciais</summary><div class="form-grid-two"><label>Tipo de cliente<select name="client_type"><option value="">Selecione…</option><option>Pessoa física</option><option>Empresa</option><option>Agência</option><option>Parceiro</option></select></label><label>Orçamento estimado<input name="budget" maxlength="80" placeholder="Ex.: R$ 5.000/mês" /></label></div><label>Método de pagamento<select name="payment_method"><option value="">Selecione…</option><option>Pix</option><option>Cartão</option><option>Boleto</option><option>Transferência</option><option>A definir</option></select></label><label>Objetivo do cliente<textarea name="client_objective" rows="2" maxlength="500" placeholder="O que esse lead deseja alcançar?"></textarea></label><label>Observações<textarea name="contact_notes" rows="3" maxlength="1000" placeholder="Contexto, preferências e informações importantes"></textarea></label></details>
+          </div>
+          <div class="form-grid-two">
+            <label>Etapa<select name="stage_id" id="deal-stage" required></select></label>
+            <label>Valor estimado (R$)<input name="value" type="number" min="0" step="0.01" placeholder="0,00" /></label>
+          </div>
+          <div class="form-grid-two">
+            <label>Previsão de fechamento<input name="expected_close_at" type="date" /></label>
+            <label>Fit comercial (%)<input name="score" type="number" min="0" max="100" value="0" /></label>
+          </div>
+          <div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Criar negócio</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="edit-pipeline-modal" hidden>
+      <div class="modal pipeline-editor-modal" role="dialog" aria-modal="true" aria-labelledby="edit-pipeline-title">
+        <button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon"><i data-icon="sliders"></i></div>
+        <p class="overline">Personalização e automação</p><h2 id="edit-pipeline-title">Editar etapas do funil</h2>
+        <p>Personalize as colunas e informe os sinais da conversa que devem avançar cada card automaticamente.</p>
+        <form id="edit-pipeline-form"><div class="pipeline-stage-editor" id="pipeline-stage-editor"></div><button class="ghost-button add-stage-button" type="button" id="add-pipeline-stage"><i data-icon="plus"></i> Adicionar etapa</button><section class="outcome-automation-editor"><div><strong>Automação entre funis</strong><small>Escolha para onde o sistema envia o lead após o resultado.</small></div><label>Ao marcar como ganho<select name="won_stage_id" id="won-outcome-stage"><option value="">Padrão: funil de clientes</option></select></label><label>Ao marcar como perda<select name="lost_stage_id" id="lost-outcome-stage"><option value="">Padrão: tratamento escolhido na perda</option></select></label></section><div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar funil</button></div></form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="loss-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon loss-icon"><i data-icon="x"></i></div><p class="overline">Encerrar oportunidade</p><h2>Qual foi o motivo da perda?</h2><p>Esse dado alimenta os relatórios e ajuda a melhorar o processo comercial.</p>
+        <form id="loss-form"><input type="hidden" name="deal_id" /><label>Motivo<select name="lost_reason" id="loss-reason-select" required></select></label><label>Próximo tratamento<select name="recovery_strategy" required><option value="">Selecione…</option><option value="retomada">Retomada comercial — criar nova oportunidade</option><option value="remarketing">Remarketing — manter em audiência</option><option value="arquivar">Não cliente — arquivar</option></select></label><div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="danger-button">Marcar como perdida</button></div></form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="dashboard-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="modal-icon"><i data-icon="sliders"></i></div><p class="overline">Personalização</p><h2>Cards do dashboard</h2><p>Ative os indicadores e arraste-os para definir a ordem. As setas continuam disponíveis para ajustes finos.</p><form id="dashboard-form"><div id="dashboard-card-options" class="dashboard-order-list" aria-label="Ordem dos cards do dashboard"></div><div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar visualização</button></div></form>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="detail-modal" hidden><div class="modal detail-modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button><div id="detail-modal-content"></div></div></div>
+    <div class="modal-backdrop" id="company-modal" hidden><div class="modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button><div class="modal-icon"><i data-icon="users"></i></div><p class="overline">Novo ambiente</p><h2>Criar perfil de empresa</h2><p>Cada perfil terá contatos, funis, tarefas, conhecimento e integrações separados.</p><form id="company-form"><label>Nome da empresa<input name="name" required maxlength="120" placeholder="Ex.: Empresa São Paulo" /></label><div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Criar perfil</button></div></form></div></div>
+    <div class="modal-backdrop" id="template-modal" hidden><div class="modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button><div class="modal-icon"><i data-icon="message"></i></div><p class="overline">Mensagem reutilizável</p><h2>Criar modelo</h2><p>Salve o rascunho e sincronize os modelos aprovados no Gerenciador do WhatsApp para disparar pela Cloud API oficial.</p><form id="template-form"><label>Nome<input name="display_name" required maxlength="120" placeholder="Ex.: Retorno de orçamento" /></label><label>Categoria<select name="category"><option value="marketing">Marketing</option><option value="utility">Utilidade</option><option value="authentication">Autenticação</option></select></label><label>Mensagem<textarea name="body" rows="6" required maxlength="2000" placeholder="Olá, {{1}}! Podemos continuar seu atendimento?"></textarea></label><small>Use {{1}}, {{2}}… para dados da planilha.</small><div class="modal-actions"><button type="button" class="ghost-button" data-close-modal>Cancelar</button><button type="submit" class="primary-button">Salvar modelo</button></div></form></div></div>
+    <div class="product-tour" id="product-tour" hidden aria-live="polite">
+      <div class="product-tour-shade" data-tour-exit></div>
+      <div class="product-tour-focus" id="product-tour-focus"></div>
+      <aside class="product-tour-card" id="product-tour-card" role="dialog" aria-modal="true" aria-labelledby="product-tour-title">
+        <button class="product-tour-close" type="button" data-tour-exit aria-label="Sair do tutorial"><i data-icon="x"></i></button>
+        <span class="overline" id="product-tour-count">Tutorial assistido</span>
+        <h2 id="product-tour-title"></h2><p id="product-tour-text"></p><small class="product-tour-instruction" id="product-tour-instruction"></small>
+        <div class="tour-progress"><i id="system-tour-progress"></i></div>
+        <div class="product-tour-actions"><button type="button" class="ghost-button" id="system-tour-prev">Voltar</button><button type="button" class="primary-button" id="system-tour-next">Próximo →</button></div>
+      </aside>
+    </div>
+
+    <div class="modal-backdrop tutorial-backdrop" id="meta-tutorial-modal" hidden>
+      <div class="modal tutorial-modal" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+        <button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <p class="overline">Tutorial acompanhado para iniciantes</p><h2 id="tutorial-title">Conecte seu WhatsApp à Meta</h2><p class="tutorial-intro">Faça uma etapa por vez. Você pode pausar, voltar e manter este guia aberto enquanto configura a Meta em outra aba.</p>
+        <div class="tutorial-player">
+          <div class="tutorial-screen" id="tutorial-screen"></div>
+          <div class="tutorial-progress"><i id="tutorial-progress"></i></div>
+          <div class="tutorial-controls"><button type="button" id="tutorial-prev" aria-label="Voltar">‹</button><button type="button" id="tutorial-play">▶ Iniciar passo a passo</button><span id="tutorial-time">1 de 11</span><button type="button" id="tutorial-next" aria-label="Avançar">›</button></div>
+        </div>
+        <div class="tutorial-caption" id="tutorial-caption"></div>
+        <div class="tutorial-links"><a href="https://developers.facebook.com/apps/" target="_blank" rel="noopener">1. Abrir Meus Apps na Meta ↗</a><a href="https://business.facebook.com/settings/system-users" target="_blank" rel="noopener">2. Abrir Usuários do sistema ↗</a><a href="https://developers.facebook.com/docs/whatsapp/cloud-api/get-started" target="_blank" rel="noopener">Ajuda oficial da Meta ↗</a></div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop guided-backdrop" id="meta-guided-modal" hidden>
+      <div class="modal guided-modal" role="dialog" aria-modal="true" aria-labelledby="guided-title">
+        <button class="modal-close" data-close-modal aria-label="Fechar"><i data-icon="x"></i></button>
+        <div class="guided-heading"><div><p class="overline">Conexão assistida</p><h2 id="guided-title">Vamos configurar juntos</h2><p>Conclua uma ação por vez. Seu progresso fica salvo neste navegador.</p></div><span id="guided-percent">0%</span></div>
+        <div class="guided-progress"><i id="guided-progress"></i></div>
+        <div class="guided-layout">
+          <nav class="guided-step-list" id="guided-step-list" aria-label="Etapas da conexão"></nav>
+          <section class="guided-content">
+            <span class="guided-current" id="guided-current"></span>
+            <h3 id="guided-step-title"></h3>
+            <p id="guided-step-text"></p>
+            <div class="guided-route"><span>Onde clicar</span><strong id="guided-route"></strong></div>
+            <ul id="guided-checklist"></ul>
+            <aside id="guided-warning"></aside>
+            <div class="guided-page-action" id="guided-page-action"></div>
+            <div class="guided-actions"><button type="button" class="ghost-button" id="guided-prev">Voltar</button><button type="button" class="primary-button" id="guided-complete">Concluí esta etapa →</button></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toasts" aria-live="polite"></div>
+    <script type="module" src="/app.js?v=20261021.1"></script>
+  </body>
+</html>
