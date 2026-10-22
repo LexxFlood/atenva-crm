@@ -34,6 +34,8 @@ const state = {
   taskCalendarDate: new Date(),
   trafficChart: 'bars',
   funnelOrientation: 'vertical',
+  inboxRequestId: 0,
+  conversationsLoadedAt: 0,
   sidebarCollapsed: localStorage.getItem('atenva-sidebar-collapsed') === 'true'
 };
 let scheduledMessageHeartbeat = null;
@@ -43,6 +45,8 @@ function resetCompanyScopedState() {
   state.dashboardPreferences = null;
   state.dashboardRange = null;
   state.conversations = [];
+  state.conversationsLoadedAt = 0;
+  state.inboxRequestId += 1;
   state.selectedConversation = null;
   state.pipeline = null;
   state.pipelines = [];
@@ -583,22 +587,61 @@ function metricCard(key, iconName, label, value, change, highlight = false) {
   return `<article class="metric-card ${highlight ? 'highlight' : ''}" data-metric="${key}" tabindex="0" role="button"><span class="metric-icon">${icon(iconName)}</span><span class="metric-label">${label}</span><div class="metric-row"><strong class="metric-value">${value}</strong><span class="metric-change">${change}</span></div></article>`;
 }
 
-async function renderInbox(preselectedId) {
-  const mobile = window.matchMedia('(max-width: 700px)').matches;
-  if (!state.conversations.length) document.querySelector('#view-inbox').innerHTML = '<div class="skeleton" style="height:100%"></div>';
-  if (!state.conversations.length || preselectedId == null) state.conversations = await api('/api/conversations');
-  const selectedId = preselectedId || (!mobile ? state.selectedConversation?.id || state.conversations[0]?.id : null);
-  state.selectedConversation = selectedId ? await api(`/api/conversations/${selectedId}`) : null;
-  document.querySelector('#view-inbox').innerHTML = `
-    <div class="inbox-layout ${state.selectedConversation ? 'chat-open' : 'list-open'}">
+function inboxLoadingRows() {
+  return Array.from({ length: 7 }, () => '<div class="conversation-row-skeleton"><i></i><span><b></b><small></small></span></div>').join('');
+}
+
+function paintInbox(selectedId = null, options = {}) {
+  const { listLoading = false, detailLoading = false } = options;
+  const selected = Number(state.selectedConversation?.id) === Number(selectedId) ? state.selectedConversation : null;
+  const host = document.querySelector('#view-inbox');
+  if (!host) return;
+  host.innerHTML = `
+    <div class="inbox-layout ${selectedId ? 'chat-open' : 'list-open'} ${listLoading ? 'inbox-loading' : ''}">
       <aside class="conversation-column">
-        <div class="conversation-tools"><div class="conversation-tools-heading"><div><strong>Conversas</strong><span>${state.conversations.length} contatos</span></div><span class="whatsapp-channel-badge">${icon('message')} WhatsApp</span></div><div class="inbox-search">${icon('search')}<input id="conversation-search" placeholder="Pesquisar ou iniciar nova conversa" /></div><div class="inbox-filters"><button class="filter-chip active" data-filter="all">Todas</button><button class="filter-chip" data-filter="unread">Não lidas</button><button class="filter-chip" data-filter="human">Humano</button></div></div>
-        <div class="conversation-list" id="conversation-list">${conversationRows(state.conversations, selectedId)}</div>
+        <div class="conversation-tools"><div class="conversation-tools-heading"><div><strong>Conversas</strong><span>${listLoading ? 'Carregando contatos…' : `${state.conversations.length} contatos`}</span></div><span class="whatsapp-channel-badge">${icon('message')} WhatsApp</span></div><div class="inbox-search">${icon('search')}<input id="conversation-search" placeholder="Pesquisar ou iniciar nova conversa" ${listLoading ? 'disabled' : ''} /></div><div class="inbox-filters"><button class="filter-chip active" data-filter="all">Todas</button><button class="filter-chip" data-filter="unread">Não lidas</button><button class="filter-chip" data-filter="human">Humano</button></div></div>
+        <div class="conversation-list" id="conversation-list">${listLoading ? inboxLoadingRows() : conversationRows(state.conversations, selectedId)}</div>
       </aside>
-      ${state.selectedConversation ? renderChat(state.selectedConversation) : '<div class="empty-state"><h3>Nenhuma conversa</h3></div>'}
-      ${state.selectedConversation ? renderContactDetail(state.selectedConversation) : ''}
+      ${selected ? renderChat(selected) : detailLoading ? '<section class="chat-column chat-loading"><div class="chat-loading-header"><i></i><span><b></b><small></small></span></div><div class="chat-loading-body"><span></span><span></span><span></span></div></section>' : '<div class="empty-state inbox-empty"><h3>Selecione uma conversa</h3><p>Escolha um contato para abrir o atendimento.</p></div>'}
+      ${selected ? renderContactDetail(selected) : ''}
     </div>`;
   bindInbox();
+}
+
+async function renderInbox(preselectedId) {
+  const requestId = ++state.inboxRequestId;
+  const mobile = window.matchMedia('(max-width: 820px)').matches;
+  const listIsFresh = state.conversations.length && Date.now() - state.conversationsLoadedAt < 30000;
+  let selectedId = preselectedId || (!mobile ? state.selectedConversation?.id || state.conversations[0]?.id : null);
+
+  paintInbox(selectedId, { listLoading: !state.conversations.length, detailLoading: Boolean(selectedId && Number(state.selectedConversation?.id) !== Number(selectedId)) });
+
+  if (!listIsFresh) {
+    try {
+      state.conversations = await api('/api/conversations');
+      state.conversationsLoadedAt = Date.now();
+    } catch (error) {
+      if (requestId === state.inboxRequestId) toast('Não foi possível carregar as conversas', error.message, 'error');
+      return;
+    }
+    if (requestId !== state.inboxRequestId) return;
+    selectedId = preselectedId || (!mobile ? state.selectedConversation?.id || state.conversations[0]?.id : null);
+  }
+
+  const cached = Number(state.selectedConversation?.id) === Number(selectedId) ? state.selectedConversation : null;
+  paintInbox(selectedId, { detailLoading: Boolean(selectedId && !cached) });
+  if (!selectedId) return;
+
+  try {
+    const conversation = await api(`/api/conversations/${selectedId}`);
+    if (requestId !== state.inboxRequestId) return;
+    state.selectedConversation = conversation;
+    paintInbox(selectedId);
+  } catch (error) {
+    if (requestId !== state.inboxRequestId) return;
+    paintInbox(null);
+    toast('Não foi possível abrir a conversa', error.message, 'error');
+  }
 }
 
 function conversationRows(items, selectedId) {
