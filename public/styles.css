@@ -503,16 +503,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } }
 
 @media (max-width: 1120px) {
-  .app-shell { grid-template-columns: 78px minmax(0, 1fr); }
-  .sidebar { padding-inline: 12px; overflow:visible; }
-  .brand { padding-inline: 9px; justify-content: center; }
-  .brand > div:last-child, .nav-item span, .nav-item em, .nav-label, .connection-card > div:not(.connection-icon), .connection-card .status-dot, .profile-card > span:not(.avatar), .profile-card > svg, .sidebar-user > span:nth-child(2) { display: none; }
-  .nav-item { justify-content: center; padding-inline: 8px; position: relative; }
-  .nav-item b { position: absolute; right: 5px; top: 4px; min-width: 15px; height: 15px; font-size: 7px; }
-  .connection-card { display: flex; justify-content: center; padding: 9px; }
-  .profile-card { display: flex; justify-content: center; padding: 8px; }
-  .company-profile-area{width:52px;align-self:center}.profile-popover{left:58px;right:auto;top:0;width:min(260px,calc(100vw - 96px));max-height:min(430px,calc(100dvh - 30px));overflow:auto}.company-option{grid-template-columns:28px minmax(0,1fr) auto}.company-option strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sidebar-user{display:flex;justify-content:center;padding:8px}.sidebar-bottom{justify-items:center}
-  .sidebar-logout-button{width:40px;align-self:center;justify-content:center;padding:7px}.sidebar-logout-button span{display:none}
   .inbox-layout { grid-template-columns: minmax(270px,31vw) minmax(0,1fr); }
   .detail-column { display: none; }
   .chart-grid, .meta-layout { grid-template-columns: 1fr; }

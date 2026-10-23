@@ -36,7 +36,9 @@ const state = {
   funnelOrientation: 'vertical',
   inboxRequestId: 0,
   conversationsLoadedAt: 0,
-  sidebarCollapsed: localStorage.getItem('atenva-sidebar-collapsed') === 'true'
+  sidebarCollapsed: localStorage.getItem('atenva-sidebar-preference-v2') == null
+    ? window.innerWidth > 820 && window.innerWidth <= 1120
+    : localStorage.getItem('atenva-sidebar-preference-v2') === 'true'
 };
 let scheduledMessageHeartbeat = null;
 
@@ -1524,7 +1526,7 @@ function bindViewLinks() { document.querySelectorAll('[data-view-link]').forEach
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => navigate(button.dataset.view)));
 document.querySelectorAll('.nav-item').forEach(button=>button.title=button.querySelector('span')?.textContent?.trim()||'');
 function applySidebarState(){const shell=document.querySelector('#app-shell');const button=document.querySelector('#sidebar-collapse');if(!shell||!button)return;const collapsed=state.sidebarCollapsed&&window.innerWidth>820;shell.classList.toggle('sidebar-collapsed',collapsed);button.setAttribute('aria-label',collapsed?'Expandir menu lateral':'Recolher menu lateral');button.title=collapsed?'Expandir menu lateral':'Recolher menu lateral';button.setAttribute('aria-expanded',String(!collapsed));}
-document.querySelector('#sidebar-collapse').addEventListener('click',()=>{state.sidebarCollapsed=!state.sidebarCollapsed;localStorage.setItem('atenva-sidebar-collapsed',String(state.sidebarCollapsed));applySidebarState();});
+document.querySelector('#sidebar-collapse').addEventListener('click',()=>{state.sidebarCollapsed=!state.sidebarCollapsed;localStorage.setItem('atenva-sidebar-preference-v2',String(state.sidebarCollapsed));localStorage.setItem('atenva-sidebar-collapsed',String(state.sidebarCollapsed));applySidebarState();});
 function closeMobileSidebar(){document.querySelector('#sidebar').classList.remove('open');document.querySelector('#sidebar-scrim').hidden=true;document.body.classList.remove('mobile-menu-open');document.querySelector('#mobile-menu').setAttribute('aria-expanded','false');}
 document.querySelector('#mobile-menu').addEventListener('click', event => {const open=!document.querySelector('#sidebar').classList.contains('open');document.querySelector('#sidebar').classList.toggle('open',open);document.querySelector('#sidebar-scrim').hidden=!open;document.body.classList.toggle('mobile-menu-open',open);event.currentTarget.setAttribute('aria-expanded',String(open));});
 document.querySelector('#sidebar-scrim').addEventListener('click',closeMobileSidebar);
