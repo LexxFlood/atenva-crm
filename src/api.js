@@ -10,6 +10,7 @@ import { connectEvolution, disconnectEvolution, evolutionStatus, extractEvolutio
 import { sendInvitationEmail } from './email.js';
 import { createGoogleTaskEvent, deleteGoogleTaskEvent, disconnectGoogle, googleAuthorizationUrl, googleCalendarEvents, googleCalendars, googleStatus, syncGoogleCalendar, updateGoogleTaskEvent } from './google-calendar.js';
 import { archiveCadence, contactJourney, enrollContacts, listCadences, processCadences, recordAttribution, relationshipOverview, saveCadence, stopCadencesForContact } from './relationships.js';
+import { appendHumanSignature, existingLeadOwner, nextLeadOwner } from './team-routing.js';
 
 function parseId(value) {
   const id = Number(value);
@@ -295,11 +296,12 @@ export async function processScheduledMessages(companyId = null) {
     const payload=asJson(item.payload,{});const content=String(payload.content||'').trim();
     if(!content){run("UPDATE scheduled_messages SET status='failed' WHERE id=? AND status='scheduled'",[item.id]);results.push({id:item.id,status:'failed'});continue;}
     try{
-      const sent=await sendWhatsAppText(String(item.phone||'').replace(/\D/g,''),content,item.company_id);
+      const signedContent=appendHumanSignature(item.company_id,payload.created_by,content);
+      const sent=await sendWhatsAppText(String(item.phone||'').replace(/\D/g,''),signedContent,item.company_id);
       const claimed=run("UPDATE scheduled_messages SET status='sent' WHERE id=? AND status='scheduled'",[item.id]);
       if(!claimed.changes)continue;
       run(`INSERT INTO messages(conversation_id,whatsapp_message_id,direction,sender_type,sender_id,content,status,metadata)
-        VALUES (?,?,'outbound','system',?,?,?,?)`,[item.conversation_id,sent.id,payload.created_by||null,content,sent.status,JSON.stringify({scheduled_message_id:item.id,kind:payload.kind||'followup',simulated:sent.simulated})]);
+        VALUES (?,?,'outbound','system',?,?,?,?)`,[item.conversation_id,sent.id,payload.created_by||null,signedContent,sent.status,JSON.stringify({scheduled_message_id:item.id,kind:payload.kind||'followup',simulated:sent.simulated})]);
       run('UPDATE conversations SET last_message_at=?,updated_at=? WHERE id=?',[now(),now(),item.conversation_id]);
       results.push({id:item.id,status:'sent'});
     }catch(error){run("UPDATE scheduled_messages SET status='failed',payload=? WHERE id=? AND status='scheduled'",[JSON.stringify({...payload,error:String(error.message||error).slice(0,300)}),item.id]);results.push({id:item.id,status:'failed',error:error.message});}
@@ -325,7 +327,7 @@ function createInbound({ phone, name, content, whatsappId, externalId, timestamp
 
   let conversation = get(`SELECT * FROM conversations WHERE contact_id=? AND status!='closed' ORDER BY id DESC LIMIT 1`, [contact.id]);
   if (!conversation) {
-    const owner = get(`SELECT u.id FROM users u JOIN user_company_memberships m ON m.user_id=u.id AND m.company_id=? AND m.is_active=1 WHERE u.status='online' AND u.is_active=1 ORDER BY (SELECT COUNT(*) FROM conversations WHERE assigned_to=u.id AND status!='closed'), u.id LIMIT 1`, [companyId]);
+    const owner = existingLeadOwner(contact.id,companyId) || nextLeadOwner(companyId);
     const result = run(`INSERT INTO conversations
       (contact_id, assigned_to, status, mode, customer_window_until, unread_count, last_message_at)
       VALUES (?, ?, 'open', 'autopilot', ?, 1, ?)`, [contact.id, owner?.id, new Date(Date.now() + 24 * 3_600_000).toISOString(), timestamp]);
@@ -426,7 +428,7 @@ async function processMetaLeadWebhook(payload) {
         for(const tag of ['Meta Ads',lead.campaign_name,lead.ad_name].map(value=>String(value||'').trim().slice(0,60)).filter(Boolean))run('INSERT OR IGNORE INTO contact_tags(contact_id,tag) VALUES (?,?)',[contact.id,tag]);
         ensureCompanyPipelines(companyId);
         const stage=get(`SELECT s.id FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE p.company_id=? AND p.kind='sales' AND COALESCE(s.is_closed,0)=0 ORDER BY p.is_default DESC,s.local_position,s.position LIMIT 1`,[companyId]);
-        const owner=get(`SELECT u.id FROM users u JOIN user_company_memberships m ON m.user_id=u.id WHERE m.company_id=? AND m.is_active=1 AND u.is_active=1 ORDER BY CASE WHEN u.status='online' THEN 0 ELSE 1 END,u.id LIMIT 1`,[companyId]);
+        const owner=existingLeadOwner(contact.id,companyId)||nextLeadOwner(companyId);
         let deal=null;
         if(stage&&!get(`SELECT d.id FROM deals d JOIN activities a ON a.deal_id=d.id WHERE d.contact_id=? AND a.action='meta_lead_imported' AND json_extract(a.metadata,'$.leadgen_id')=? LIMIT 1`,[contact.id,leadgenId])){
           const created=run(`INSERT INTO deals(contact_id,stage_id,owner_id,title,value_cents,currency,score,status) VALUES (?,?,?, ?,0,'BRL',0,'open')`,[contact.id,stage.id,owner?.id||null,`${name}${lead.campaign_name?` · ${lead.campaign_name}`:''}`.slice(0,160)]);
@@ -589,11 +591,12 @@ export async function routeApi(request, response, url, body, context) {
     const id = parseId(match[1]);
     const conversation = getConversation(id, context.user.companyId);
     if (!body?.content?.trim()) throw Object.assign(new Error('A mensagem não pode estar vazia'), { statusCode: 400 });
-    const sendResult = await sendWhatsAppText(conversation.phone.replace(/\D/g, ''), body.content.trim(), context.user.companyId);
+    const signedContent = appendHumanSignature(context.user.companyId, context.user.id, body.content);
+    const sendResult = await sendWhatsAppText(conversation.phone.replace(/\D/g, ''), signedContent, context.user.companyId);
     const result = run(`INSERT INTO messages
       (conversation_id, whatsapp_message_id, direction, sender_type, sender_id, content, status, metadata)
       VALUES (?, ?, 'outbound', 'human', ?, ?, ?, ?)`,
-    [id, sendResult.id, context.user.id, body.content.trim().slice(0, 4000), sendResult.status, JSON.stringify({ simulated: sendResult.simulated })]);
+    [id, sendResult.id, context.user.id, signedContent, sendResult.status, JSON.stringify({ simulated: sendResult.simulated })]);
     run(`UPDATE conversations SET mode='human', unread_count=0, last_message_at=?, updated_at=? WHERE id=?`, [now(), now(), id]);
     return { id: Number(result.lastInsertRowid), ...sendResult };
   }

@@ -1,6 +1,7 @@
 import readXlsxFile from 'read-excel-file/node';
 import { all, get, now, run, transaction } from './db.js';
 import { sendWhatsAppTemplate } from './whatsapp.js';
+import { existingLeadOwner, nextLeadOwner } from './team-routing.js';
 import { metaConfig, metaIsConfigured } from './integrations.js';
 
 const MAX_FILE_BYTES = 1_200_000;
@@ -169,7 +170,7 @@ function ensureContactAndConversation(recipient, companyId) {
   if (get('SELECT consent_status FROM contacts WHERE id=?', [contact.id])?.consent_status !== 'granted') throw new Error('Contato sem consentimento ativo');
   let conversation = get("SELECT * FROM conversations WHERE contact_id=? AND status!='closed' ORDER BY id DESC LIMIT 1", [contact.id]);
   if (!conversation) {
-    const owner = get("SELECT id FROM users WHERE is_active=1 ORDER BY CASE status WHEN 'online' THEN 0 ELSE 1 END,id LIMIT 1");
+    const owner = existingLeadOwner(contact.id,companyId) || nextLeadOwner(companyId);
     const result = run("INSERT INTO conversations (contact_id,assigned_to,status,mode,unread_count,last_message_at) VALUES (?,?,'open','human',0,?)", [contact.id, owner?.id || null, now()]);
     conversation = get('SELECT * FROM conversations WHERE id=?', [Number(result.lastInsertRowid)]);
   }

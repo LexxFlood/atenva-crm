@@ -23,6 +23,7 @@ const { completeMetaAuthorization, metaAuthorizationUrl, metaOauthStatus, public
 const { authenticate, ensureAdminCredentials, hashPassword, login, logout, requireRole } = await import('../src/auth.js');
 const { processMetaLeadWebhook, processScheduledMessages, processWebhook, routeApi } = await import('../src/api.js');
 const { processCadences, stopCadencesForContact } = await import('../src/relationships.js');
+const { appendHumanSignature, nextLeadOwner } = await import('../src/team-routing.js');
 
 seed();
 ensureAdminCredentials();
@@ -36,6 +37,24 @@ test('cria o banco e os dados essenciais', () => {
   assert.equal(get('SELECT COUNT(*) AS count FROM loss_reasons').count, 6);
   assert.equal(get('SELECT COUNT(*) AS count FROM knowledge_documents').count, 4);
   assert.equal(get('SELECT autonomy_level FROM agent_config WHERE id=1').autonomy_level, 2);
+});
+
+test('distribui novos leads em rodízio persistente por ordem de chegada', () => {
+  const companyId=Number(run("INSERT INTO company_profiles(name,slug,status) VALUES ('Empresa Rodízio','empresa-rodizio','active')").lastInsertRowid);
+  const first=Number(run("INSERT INTO users(name,email,role,status,is_active) VALUES ('Atendente Um','fila1@atenva.test','agent','online',1)").lastInsertRowid);
+  const second=Number(run("INSERT INTO users(name,email,role,status,is_active) VALUES ('Atendente Dois','fila2@atenva.test','agent','online',1)").lastInsertRowid);
+  run("INSERT INTO user_company_memberships(company_id,user_id,role,is_active) VALUES (?,?,'agent',1)",[companyId,first]);
+  run("INSERT INTO user_company_memberships(company_id,user_id,role,is_active) VALUES (?,?,'agent',1)",[companyId,second]);
+  assert.deepEqual([nextLeadOwner(companyId).id,nextLeadOwner(companyId).id,nextLeadOwner(companyId).id,nextLeadOwner(companyId).id],[first,second,first,second]);
+});
+
+test('Produtora Mais Tração assina mensagens humanas com o nome do atendente', () => {
+  const companyId=Number(run("INSERT INTO company_profiles(name,slug,status) VALUES ('Produtora Mais Tração','produtora-mais-tracao','active')").lastInsertRowid);
+  const userId=Number(run("INSERT INTO users(name,email,role,status,is_active) VALUES ('Thiago Fernandes','thiago.assinatura@atenva.test','agent','online',1)").lastInsertRowid);
+  run("INSERT INTO user_company_memberships(company_id,user_id,role,is_active) VALUES (?,?,'agent',1)",[companyId,userId]);
+  assert.equal(appendHumanSignature(companyId,userId,'Olá! Como posso ajudar?'),'Olá! Como posso ajudar?\n\n— Thiago Fernandes');
+  assert.equal(appendHumanSignature(companyId,userId,'Olá!\n\n— Thiago Fernandes'),'Olá!\n\n— Thiago Fernandes');
+  assert.equal(appendHumanSignature(1,userId,'Mensagem Atenva'),'Mensagem Atenva');
 });
 
 test('classifica preço sem confundir quantidade de pessoas com handoff', () => {
