@@ -155,7 +155,10 @@ export function login({ email, password, ip, userAgent, companySlug = '' }) {
     if (Number(activeCompany.id) !== Number(user.active_company_id)) run('UPDATE users SET active_company_id=? WHERE id=?', [activeCompany.id, user.id]);
   }
 
-  run('DELETE FROM sessions WHERE user_id=? OR expires_at < ?', [user.id, now()]);
+  // Um novo login não deve expulsar as outras abas ou dispositivos do mesmo
+  // usuário. Removemos apenas sessões vencidas; cada sessão continua podendo
+  // ser encerrada individualmente pelo logout.
+  run('DELETE FROM sessions WHERE expires_at < ?', [now()]);
   const nonce = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(24).toString('base64url');
   const expiresAt = new Date(Date.now() + sessionHours * 3_600_000).toISOString();

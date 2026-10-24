@@ -139,6 +139,9 @@ test('cria, autentica e revoga uma sessão segura', () => {
   assert.match(result.cookie, /HttpOnly/);
   assert.match(result.cookie, /SameSite=Lax/);
   assert.doesNotMatch(result.cookie, /SameSite=Strict/);
+  const secondSession = login({ email: 'ana@verdecrm.local', password: 'VerdeDemo!2026', ip: '127.0.0.2', userAgent: 'second-tab' });
+  assert.ok(secondSession.cookie);
+  assert.ok(get('SELECT COUNT(*) AS count FROM sessions WHERE user_id=1').count >= 2, 'um novo login deve preservar a outra aba/dispositivo');
   const token = decodeURIComponent(result.cookie.match(/verde_session=([^;]+)/)[1]);
   const auth = authenticate({ headers: { cookie: `verde_session=${encodeURIComponent(token)}` } });
   assert.equal(auth.user.id, 1);
@@ -961,6 +964,17 @@ test('troca de empresa limpa dados de funis e OAuth mantém sessão no retorno',
   assert.doesNotMatch(auth,/SameSite=Strict/);
   assert.match(auth,/export function refreshCookie/);
   assert.match(server,/renewedCookie = refreshCookie\(request\)/);
+});
+
+test('navegação e integrações continuam utilizáveis durante falhas parciais',()=>{
+  const app=readFileSync(new URL('../public/app.js',import.meta.url),'utf8');
+  const css=readFileSync(new URL('../public/styles.css',import.meta.url),'utf8');
+  assert.match(app,/function refreshSession\(\)/);
+  assert.match(app,/credentials:'same-origin'/);
+  assert.match(app,/Promise\.allSettled\(\[api\('\/api\/meta\/status'/);
+  assert.match(app,/id="retry-integrations"/);
+  assert.match(app,/if \(token !== navigationToken\) return;/);
+  assert.match(css,/\.integration-load-warning/);
 });
 
 test('menu lateral possui rolagem própria, usuário visível e saída direta',()=>{

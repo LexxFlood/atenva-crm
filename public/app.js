@@ -220,19 +220,43 @@ document.querySelectorAll('.theme-toggle').forEach(button => button.addEventList
   applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 }));
 
+let sessionRefreshPromise = null;
+
+async function refreshSession() {
+  if (!sessionRefreshPromise) {
+    sessionRefreshPromise = fetch('/api/auth/me', { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+      .then(async response => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || 'Sessão indisponível');
+        csrfToken = payload.csrfToken || '';
+        if (payload.user) state.user = payload.user;
+        return payload;
+      })
+      .finally(() => { sessionRefreshPromise = null; });
+  }
+  return sessionRefreshPromise;
+}
+
 async function api(path, options = {}) {
   const method = options.method || 'GET';
   const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs)||12_000);
-  const {timeoutMs,...fetchOptions}=options;
+  const {timeoutMs,_authRetried=false,...fetchOptions}=options;
   let response;
   try{response=await fetch(path, {
     ...fetchOptions,
+    credentials:'same-origin',
     signal:controller.signal,
     headers: { 'Content-Type': 'application/json', ...(csrfToken && !['GET', 'HEAD'].includes(method) ? { 'X-CSRF-Token': csrfToken } : {}), ...(options.headers || {}) },
     body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body
   });}catch(error){if(error.name==='AbortError'){const timeoutError=new Error('A conexão demorou demais. Tente novamente.');timeoutError.status=408;throw timeoutError;}throw error;}finally{clearTimeout(timeout);}
   const payload = await response.json().catch(() => ({}));
   if (response.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/me') {
+    if (!_authRetried) {
+      try {
+        await refreshSession();
+        return api(path, { ...options, _authRetried: true });
+      } catch {}
+    }
     const error = new Error('Sua sessão expirou. Entre novamente para continuar.');
     error.sessionExpired = true;
     showLogin(error.message);
@@ -1227,17 +1251,23 @@ async function renderMetaAds() {
 
 async function renderMeta() {
   setLoading('#view-meta'); const end = new Date().toISOString().slice(0,10); const startDate = new Date(); startDate.setDate(startDate.getDate()-29); const start = startDate.toISOString().slice(0,10);
-  const [status, report, google] = await Promise.all([api('/api/meta/status'), api(`/api/meta/metrics?start=${start}&end=${end}`), api('/api/integrations/google/status')]);
+  const integrationResults = await Promise.allSettled([api('/api/meta/status'), api(`/api/meta/metrics?start=${start}&end=${end}`), api('/api/integrations/google/status')]);
+  const status = integrationResults[0].status === 'fulfilled' ? integrationResults[0].value : {connected:false,oauth_connected:false,oauth:{configured:false,lead_retrieval_enabled:false},ad_accounts_connected:0,pages_connected:0,lead_pages_subscribed:0};
+  const report = integrationResults[1].status === 'fulfilled' ? integrationResults[1].value : {demo:false,totals:{conversations_started:0,messages_sent:0,messages_delivered:0,messages_read:0,spend_cents:0},daily:[]};
+  const google = integrationResults[2].status === 'fulfilled' ? integrationResults[2].value : {connected:false,configured:false};
+  const integrationErrors = integrationResults.map((result,index)=>result.status==='rejected'?`${['Meta/WhatsApp','métricas','Google Agenda'][index]}: ${result.reason?.message||'indisponível'}`:'').filter(Boolean);
   let googleCalendars=[];let googleCalendarError='';if(google.connected){try{googleCalendars=await api('/api/integrations/google/calendars');}catch(error){googleCalendarError=error.message;}}
   let metaPages=[],metaBusinesses=[];if(status.oauth_connected){const assets=await Promise.allSettled([api('/api/meta/pages'),api('/api/meta/businesses')]);metaPages=assets[0].status==='fulfilled'?assets[0].value:[];metaBusinesses=assets[1].status==='fulfilled'?assets[1].value:[];}
   const deliveryRate = report.totals.messages_sent ? Math.round(report.totals.messages_delivered / report.totals.messages_sent * 100) : 0;
   const readRate = report.totals.messages_delivered ? Math.round(report.totals.messages_read / report.totals.messages_delivered * 100) : 0;
   document.querySelector('#view-meta').innerHTML = `<div class="section-head"><div><h2>Integrações</h2><p>Google, Meta Ads e WhatsApp oficial conectados por cliente.</p></div><span class="connection-pill ${status.connected ? 'connected' : ''}"><i></i>${status.connected?'WhatsApp oficial conectado':'WhatsApp oficial pendente'}</span></div>
+  ${integrationErrors.length?`<div class="integration-load-warning">${icon('info')}<div><strong>Alguns dados não responderam agora</strong><span>${escapeHtml(integrationErrors.join(' · '))}. As demais conexões continuam disponíveis.</span></div><button class="ghost-button" id="retry-integrations">Tentar novamente</button></div>`:''}
   <section class="panel google-integration-card ${google.connected?'is-connected':''}"><div class="google-integration-icon">G</div><div><p class="overline">Agenda e reuniões</p><h3>${google.connected?'Google Agenda conectado':'Conectar Google Agenda'}</h3><p>${google.connected?`Conta ${escapeHtml(google.email||'Google')} conectada. ${google.last_synced_at?`Última atualização ${relativeTime(google.last_synced_at)} · ${google.imported_events} evento(s).`:'A primeira sincronização será concluída automaticamente.'}`:'Entre com seu e-mail Google uma vez; reuniões e compromissos aparecerão automaticamente no calendário.'}</p>${googleCalendars.length?`<div class="google-calendar-list">${googleCalendars.map(calendar=>`<span><i style="background:${escapeHtml(calendar.color)}"></i>${escapeHtml(calendar.name)}${calendar.primary?' · principal':''}</span>`).join('')}</div>`:''}${googleCalendarError||google.sync_error?`<small class="integration-error">${escapeHtml(googleCalendarError||google.sync_error)}</small>`:''}</div><div>${google.connected?`${google.needs_reconnect||googleCalendarError?'<button class="primary-button" id="connect-google">Reconectar Google</button>':'<button class="ghost-button" id="sync-google">Sincronizar agora</button>'}<button class="ghost-button" id="disconnect-google">Desconectar</button>`:`<button class="primary-button" id="connect-google" ${google.configured?'':'disabled'}>Entrar com Google</button>${google.configured?'':'<small>Configuração do Google pendente no servidor.</small>'}`}</div></section>
   <section class="panel meta-login-card ${status.oauth_connected?'is-connected':''}"><div class="meta-login-icon">M</div><div><p class="overline">Facebook, Instagram e Lead Ads</p><h3>${status.oauth_connected?'Conta Meta conectada':'Conectar Meta com um login'}</h3><p>${status.oauth_connected?`${status.ad_accounts_connected} conta(s) de anúncio e ${status.pages_connected} página(s) atualizadas automaticamente. Captação de leads: ${status.lead_pages_subscribed?'ativa em '+status.lead_pages_subscribed+' página(s)':status.oauth?.lead_retrieval_enabled?'pronta para ativar':'aguardando aprovação da Meta'}.`:'Entre com Facebook e escolha as contas de anúncio e páginas que deseja acompanhar.'}</p>${status.marketing_sync_error?`<small class="integration-error">Última tentativa: ${escapeHtml(status.marketing_sync_error)}</small>`:''}</div><div><button class="primary-button" id="connect-meta-oauth" ${status.oauth?.configured?'':'disabled'}>${status.oauth_connected?'Reconectar Facebook':'Entrar com Facebook'}</button>${status.oauth_connected&&status.oauth?.lead_retrieval_enabled&&!status.lead_pages_subscribed?'<button class="ghost-button" id="activate-meta-leads">Ativar leads dos formulários</button>':''}${!status.oauth?.configured?'<small>OAuth da Meta pendente no servidor.</small>':!status.oauth?.lead_retrieval_enabled?'<small>A conexão básica segue funcionando. Para captar formulários, falta liberar leads_retrieval no aplicativo da Meta.</small>':status.lead_pages_subscribed?'<small>Novos formulários entram automaticamente em Contatos, Funis e Tarefas.</small>':'<small>Reconecte e ative as páginas após a aprovação.</small>'}</div></section>
   ${status.oauth_connected?`<section class="panel meta-assets"><div class="panel-header"><div><h3>Portfólios empresariais e ativos</h3><span>Escolha a BM ativa e gerencie as páginas liberadas neste login.</span></div><button class="ghost-button" id="refresh-meta-assets">${icon('refresh')} Atualizar ativos</button></div><div class="meta-business-list">${metaBusinesses.map(business=>`<button type="button" data-meta-business="${business.id}" class="${business.active?'active':''}"><span><strong>${escapeHtml(business.name)}</strong><small>${escapeHtml(business.verification_status||'Status não informado')}</small></span><b>${business.active?'Ativa':'Usar esta BM'}</b></button>`).join('')||'<p class="empty-inline">Nenhuma BM foi liberada para este login.</p>'}</div><div class="meta-page-list">${metaPages.map(page=>`<article><div><strong>${escapeHtml(page.name)}</strong><span>${escapeHtml(page.category||'Página')} ${page.instagram?`· @${escapeHtml(page.instagram.username||page.instagram.name||'Instagram')}`:''}</span></div><button class="ghost-button" data-meta-page="${page.id}">Ver formulários</button></article>`).join('')||'<p class="empty-inline">Nenhuma página foi liberada para este login.</p>'}</div><div id="meta-form-list"></div></section>`:''}
   <details class="official-meta-details" open><summary>WhatsApp oficial · canal principal em tempo real</summary><div class="meta-layout"><section class="panel connection-setup"><div class="panel-header"><div><h3>Conectar WhatsApp Cloud API</h3><span>Credenciais isoladas por cliente e criptografadas</span></div>${icon('link')}</div>${status.connected ? `<div class="connected-account"><span class="conversation-avatar">${icon('check')}</span><div><strong>${escapeHtml(status.verified_name || 'WhatsApp Business')}</strong><p>${escapeHtml(status.display_phone_number || status.phone_number_id || '')} · Webhook ${status.webhooks_subscribed?'ativo':'pendente'} · Qualidade ${escapeHtml(status.quality_rating || 'não informada')}</p></div></div>` : ''}<form class="meta-config-form" id="meta-config-form"><label>Token permanente <input type="password" name="access_token" autocomplete="off" placeholder="${status.oauth_connected ? '•••••••• (manter atual)' : 'EAAG…'}"></label><div class="field-pair"><label>Phone Number ID<input name="phone_number_id" inputmode="numeric" placeholder="${escapeHtml(status.phone_number_id || 'ID do telefone')}"></label><label>Business Account ID<input name="business_account_id" inputmode="numeric" placeholder="${escapeHtml(status.business_account_id || 'ID da conta WABA')}"></label></div><label>App Secret<input type="password" name="app_secret" autocomplete="off" placeholder="${status.oauth_connected ? '•••••••• (configurado pela Atenva)' : 'Segredo do app'}"></label><div class="field-pair"><label>Token de verificação<input name="verify_token" autocomplete="off" placeholder="${status.verify_token_configured?'Configurado pela Atenva':'Frase secreta'}"></label><label>Versão da API<input name="api_version" value="${escapeHtml(status.api_version || 'v23.0')}"></label></div><div class="connection-form-actions"><button type="submit" class="primary-button">Salvar credenciais</button><button type="button" class="ghost-button" id="test-meta">Validar e ativar webhook</button></div></form></section><section><div class="meta-metric-grid">${metricCard('conversations','message','Conversas iniciadas',report.totals.conversations_started,'últimos 30 dias')}${metricCard('sent','send','Mensagens enviadas',report.totals.messages_sent,`${deliveryRate}% entregues`)}${metricCard('read','check','Taxa de leitura',`${readRate}%`,`${report.totals.messages_read} mensagens lidas`)}${metricCard('spend','money','Custo Meta',money(report.totals.spend_cents),'estimativa do período',true)}</div><div class="panel"><div class="panel-header"><div><h3>Desempenho diário</h3><span>${report.demo ? 'Dados ilustrativos até conectar a Meta' : 'Dados sincronizados da Meta'}</span></div>${status.connected ? '<button class="link-button" id="sync-meta">Sincronizar agora</button>' : ''}</div><div class="meta-table"><div class="meta-row head"><span>Data</span><span>Recebidas</span><span>Enviadas</span><span>Entregues</span><span>Lidas</span></div>${report.daily.slice(-10).reverse().map(day => `<div class="meta-row"><span>${new Date(`${day.date}T12:00:00`).toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})}</span><b>${day.messages_received}</b><b>${day.messages_sent}</b><b>${day.messages_delivered}</b><b>${day.messages_read}</b></div>`).join('')}</div></div><div class="connection-guide-options"><button id="open-meta-tutorial"><b>▶ Tutorial explicado</b><span>Veja as etapas completas.</span></button><button id="open-meta-guided"><b>→ Conexão assistida</b><span>Siga com links e progresso salvo.</span></button></div></section></div></details>`;
   installOfficialWhatsAppConnect(status);
+  document.querySelector('#retry-integrations')?.addEventListener('click',()=>renderMeta());
   document.querySelector('#connect-google')?.addEventListener('click',async event=>{event.currentTarget.disabled=true;try{const result=await api('/api/integrations/google/start');location.href=result.url;}catch(error){toast('Não foi possível conectar',error.message,'error');event.currentTarget.disabled=false;}});
   document.querySelector('#sync-google')?.addEventListener('click',async event=>{event.currentTarget.disabled=true;try{const result=await api('/api/integrations/google/sync',{method:'POST',body:{},timeoutMs:45_000});toast('Agendas sincronizadas',`${result.events} evento(s) de ${result.calendars} agenda(s) atualizados.`);await renderMeta();}catch(error){toast('Não foi possível sincronizar',error.message,'error');event.currentTarget.disabled=false;}});
   document.querySelector('#disconnect-google')?.addEventListener('click',async()=>{await api('/api/integrations/google/disconnect',{method:'POST',body:{}});toast('Agenda desconectada','Os eventos do Google deixaram de ser sincronizados.');renderMeta();});
@@ -1502,17 +1532,20 @@ const titles = { overview: 'Visão geral', inbox: 'Conversas', pipeline: 'Funis'
 let navigationToken = 0;
 
 async function navigate(view, payload) {
+  if (!renderers[view]) return;
   const token = ++navigationToken;
   state.view = view;
   document.querySelector('#page-title').textContent = titles[view];
   closeMobileSidebar();
   const target = document.querySelector(`#view-${view}`);
+  document.querySelectorAll('.view').forEach(item => item.classList.toggle('active', item === target));
+  document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
   try {
     await renderers[view](payload);
     if (token !== navigationToken) return;
-    document.querySelectorAll('.view').forEach(item => item.classList.toggle('active', item === target));
-    document.querySelectorAll('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
+    bindViewLinks();
   } catch (error) {
+    if (token !== navigationToken) return;
     if (!error.sessionExpired) {
       if(target){target.innerHTML=`<div class="view-load-error">${icon('info')}<div><h3>Esta área não pôde ser aberta</h3><p>${escapeHtml(error.message)}</p><button class="primary-button" data-retry-view="${escapeHtml(view)}">Tentar novamente</button></div></div>`;document.querySelectorAll('.view').forEach(item=>item.classList.toggle('active',item===target));document.querySelectorAll('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.view===view));target.querySelector('[data-retry-view]')?.addEventListener('click',()=>navigate(view,payload));}
       toast('Não foi possível carregar', error.message, 'error');
