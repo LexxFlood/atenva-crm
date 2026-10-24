@@ -3,7 +3,7 @@ import { all, asJson, db, ensureCompanyPipelines, get, now, run, transaction } f
 import { agentModelStatus, companyAgentConfig, ensureCompanyAgentConfig, planAgentCommand, previewAgentResponse, processInboundMessage } from './agent.js';
 import { downloadWhatsAppMedia, extractWebhookEvents, sendWhatsAppAudio, sendWhatsAppText } from './whatsapp.js';
 import { hashPassword, requireRole, verifyPassword } from './auth.js';
-import { activateMetaLeadRetrieval, companyForMetaIdentifiers, companyForMetaPage, completeWhatsAppEmbeddedSignup, fetchMetaLead, metaAdAccounts, metaAdCampaigns, metaAdsInsights, metaAuthorizationUrl, metaBusinesses, metaIsConfigured, metaLeadForms, metaOauthStatus, metaPages, publicMetaConfig, saveMetaConfig, selectMetaBusiness, syncMetaAnalytics, syncMetaMarketing, testMetaConnection } from './integrations.js';
+import { activateMetaLeadRetrieval, companyForMetaIdentifiers, companyForMetaPage, completeWhatsAppEmbeddedSignup, fetchMetaLead, metaAdAccounts, metaAdCampaigns, metaAdsInsights, metaAuthorizationUrl, metaBusinesses, metaIsConfigured, metaLeadForms, metaOauthStatus, metaPages, publicMetaConfig, saveMetaConfig, selectMetaBusiness, selectWhatsAppNumber, syncMetaAnalytics, syncMetaMarketing, testMetaConnection } from './integrations.js';
 import { qualificationConfig, recalculateContactQualification, recalculateQualifications, saveQualificationConfig } from './qualification.js';
 import { approvedTemplates, campaignDetail, campaignList, cancelCampaign, importCampaign, startCampaign, syncApprovedTemplates, updateCampaignDelivery } from './campaigns.js';
 import { connectEvolution, disconnectEvolution, evolutionStatus, extractEvolutionWebhookEvents } from './evolution.js';
@@ -1201,6 +1201,10 @@ export async function routeApi(request, response, url, body, context) {
   if (method === 'POST' && path === '/api/meta/whatsapp/embedded-signup') {
     requireRole(context, ['admin', 'manager']);
     return completeWhatsAppEmbeddedSignup({ code:body.code, wabaId:body.waba_id, phoneNumberId:body.phone_number_id, companyId:context.user.companyId });
+  }
+  if (method === 'PUT' && path === '/api/meta/whatsapp/numbers/active') {
+    requireRole(context, ['admin', 'manager']);
+    return selectWhatsAppNumber(context.user.companyId, body.phone_number_id);
   }
   if (method === 'GET' && path === '/api/evolution/status') return evolutionStatus(context.user.companyId);
   if (method === 'POST' && path === '/api/evolution/connect') {

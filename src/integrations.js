@@ -78,21 +78,31 @@ export function metaMarketingConfig(companyId = 1) {
 export function metaConfig(companyId = 1) {
   const stored = storedMetaConfig(companyId);
   const allowEnvironmentFallback = Number(companyId) === 1;
+  const legacyNumber = stored.phoneNumberId ? [{
+    phoneNumberId:stored.phoneNumberId,businessAccountId:stored.businessAccountId||'',accessToken:stored.accessToken||'',
+    verifiedName:stored.verifiedName||null,displayPhoneNumber:stored.displayPhoneNumber||null,qualityRating:stored.qualityRating||null,
+    registrationPin:stored.registrationPin||null,connectedAt:stored.connectedAt||null
+  }] : [];
+  const numbers = Array.isArray(stored.numbers) && stored.numbers.length ? stored.numbers : legacyNumber;
+  const activeId = stored.activePhoneNumberId || stored.phoneNumberId || numbers[0]?.phoneNumberId || '';
+  const active = numbers.find(item=>String(item.phoneNumberId)===String(activeId)) || numbers[0] || {};
   return {
-    accessToken: stored.accessToken || (allowEnvironmentFallback ? String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim() : ''),
-    phoneNumberId: stored.phoneNumberId || (allowEnvironmentFallback ? String(process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim() : ''),
-    businessAccountId: stored.businessAccountId || (allowEnvironmentFallback ? String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '').trim() : ''),
+    accessToken: active.accessToken || stored.accessToken || (allowEnvironmentFallback ? String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim() : ''),
+    phoneNumberId: active.phoneNumberId || stored.phoneNumberId || (allowEnvironmentFallback ? String(process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim() : ''),
+    businessAccountId: active.businessAccountId || stored.businessAccountId || (allowEnvironmentFallback ? String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '').trim() : ''),
     appSecret: stored.appSecret || (allowEnvironmentFallback ? String(process.env.WHATSAPP_APP_SECRET || '').trim() : '') || String(process.env.META_APP_SECRET || '').trim(),
     verifyToken: stored.verifyToken || String(process.env.WHATSAPP_VERIFY_TOKEN || '').trim(),
     apiVersion: stored.apiVersion || String(process.env.WHATSAPP_API_VERSION || 'v23.0').trim(),
-    connectedAt: stored.connectedAt || null,
-    verifiedName: stored.verifiedName || null,
-    displayPhoneNumber: stored.displayPhoneNumber || null,
-    qualityRating: stored.qualityRating || null,
+    connectedAt: active.connectedAt || stored.connectedAt || null,
+    verifiedName: active.verifiedName || stored.verifiedName || null,
+    displayPhoneNumber: active.displayPhoneNumber || stored.displayPhoneNumber || null,
+    qualityRating: active.qualityRating || stored.qualityRating || null,
     webhooksSubscribed: Boolean(stored.webhooksSubscribed),
     lastCheckedAt: stored.lastCheckedAt || null,
-    registrationPin: stored.registrationPin || null,
-    onboardingMethod: stored.onboardingMethod || null
+    registrationPin: active.registrationPin || stored.registrationPin || null,
+    onboardingMethod: stored.onboardingMethod || null,
+    activePhoneNumberId: active.phoneNumberId || '',
+    numbers
   };
 }
 
@@ -102,7 +112,7 @@ function storedCompanyConfigs() {
 
 export function companyForMetaIdentifiers({phoneNumberId='',businessAccountId=''}={}) {
   const phone=String(phoneNumberId||'');const waba=String(businessAccountId||'');
-  for(const item of storedCompanyConfigs())if((phone&&String(item.config.phoneNumberId||'')===phone)||(waba&&String(item.config.businessAccountId||'')===waba))return item.companyId;
+  for(const item of storedCompanyConfigs()){const numbers=Array.isArray(item.config.numbers)?item.config.numbers:[];if((phone&&String(item.config.phoneNumberId||'')===phone)||(waba&&String(item.config.businessAccountId||'')===waba||numbers.some(number=>(phone&&String(number.phoneNumberId||'')===phone)||(waba&&String(number.businessAccountId||'')===waba))))return item.companyId;}
   const primary=metaConfig(1);if((phone&&String(primary.phoneNumberId||'')===phone)||(waba&&String(primary.businessAccountId||'')===waba))return 1;
   return null;
 }
@@ -151,6 +161,11 @@ export function publicMetaConfig(companyId = 1) {
     two_step_pin_configured: Boolean(config.registrationPin),
     verify_token_configured: Boolean(config.verifyToken),
     api_version: config.apiVersion
+    ,whatsapp_numbers: config.numbers.map(number=>({
+      phone_number_id:String(number.phoneNumberId||''),business_account_id:String(number.businessAccountId||''),
+      verified_name:number.verifiedName||null,display_phone_number:number.displayPhoneNumber||null,quality_rating:number.qualityRating||null,
+      connected_at:number.connectedAt||null,active:String(number.phoneNumberId||'')===String(config.activePhoneNumberId||config.phoneNumberId)
+    }))
   };
 }
 
@@ -178,7 +193,22 @@ export function saveMetaConfig(input, companyId = 1) {
   if (!/^\d+$/.test(next.phoneNumberId)) throw Object.assign(new Error('Phone Number ID inválido'), { statusCode: 400 });
   if (next.businessAccountId && !/^\d+$/.test(next.businessAccountId)) throw Object.assign(new Error('Business Account ID inválido'), { statusCode: 400 });
   if (!next.accessToken || !next.appSecret || !next.verifyToken) throw Object.assign(new Error('Preencha token, App Secret e token de verificação'), { statusCode: 400 });
+  next.activePhoneNumberId=next.phoneNumberId;
+  const currentNumbers=Array.isArray(current.numbers)?current.numbers:[];
+  next.numbers=[...currentNumbers.filter(item=>String(item.phoneNumberId)!==String(next.phoneNumberId)),{
+    phoneNumberId:next.phoneNumberId,businessAccountId:next.businessAccountId,accessToken:next.accessToken,
+    verifiedName:next.verifiedName,displayPhoneNumber:next.displayPhoneNumber,qualityRating:next.qualityRating,
+    registrationPin:next.registrationPin,connectedAt:next.connectedAt
+  }];
   persistMetaConfig(companyId, next);
+  return publicMetaConfig(companyId);
+}
+
+export function selectWhatsAppNumber(companyId = 1, phoneNumberId = '') {
+  const current=storedMetaConfig(companyId);const numbers=Array.isArray(current.numbers)?current.numbers:[];
+  const selected=numbers.find(item=>String(item.phoneNumberId)===String(phoneNumberId));
+  if(!selected)throw Object.assign(new Error('Este número não pertence à empresa ativa.'),{statusCode:404});
+  persistMetaConfig(companyId,{...current,...selected,activePhoneNumberId:String(selected.phoneNumberId),phoneNumberId:String(selected.phoneNumberId),businessAccountId:String(selected.businessAccountId||''),accessToken:selected.accessToken||current.accessToken||''});
   return publicMetaConfig(companyId);
 }
 
@@ -432,13 +462,20 @@ export async function completeWhatsAppEmbeddedSignup({ code, wabaId, phoneNumber
   if (!(subscription.success === true || subscription.success === 'true')) throw Object.assign(new Error('A Meta não confirmou a ativação do webhook.'), { statusCode: 400 });
 
   const current = storedMetaConfig(companyId);
-  const sameRegisteredNumber = String(current.phoneNumberId || '') === String(phoneNumberId) && Boolean(current.registrationPin);
-  const registrationPin = sameRegisteredNumber ? current.registrationPin : String(randomInt(100000, 1000000));
+  const existingNumbers=Array.isArray(current.numbers)?current.numbers:[];
+  const existingNumber=existingNumbers.find(item=>String(item.phoneNumberId)===String(phoneNumberId));
+  const sameRegisteredNumber = Boolean(existingNumber?.registrationPin)||(String(current.phoneNumberId || '') === String(phoneNumberId) && Boolean(current.registrationPin));
+  const registrationPin = existingNumber?.registrationPin || (sameRegisteredNumber ? current.registrationPin : String(randomInt(100000, 1000000)));
   if (!sameRegisteredNumber) await graphJson(`https://graph.facebook.com/${cfg.apiVersion}/${encodeURIComponent(String(phoneNumberId))}/register`, {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ messaging_product: 'whatsapp', pin: registrationPin })
   }, 'O número foi autorizado, mas não pôde ser registrado na Cloud API.');
 
+  const connectedNumber={
+    accessToken:token.access_token,phoneNumberId:String(phoneNumberId),businessAccountId:String(wabaId),
+    verifiedName:phone.verified_name||null,displayPhoneNumber:phone.display_phone_number||null,qualityRating:phone.quality_rating||null,
+    registrationPin,connectedAt:now()
+  };
   persistMetaConfig(companyId, {
     ...current,
     accessToken: token.access_token,
@@ -454,7 +491,8 @@ export async function completeWhatsAppEmbeddedSignup({ code, wabaId, phoneNumber
     displayPhoneNumber: phone.display_phone_number || null,
     qualityRating: phone.quality_rating || null,
     registrationPin,
-    onboardingMethod: 'embedded_signup'
+    onboardingMethod: 'embedded_signup',activePhoneNumberId:String(phoneNumberId),
+    numbers:[...existingNumbers.filter(item=>String(item.phoneNumberId)!==String(phoneNumberId)),connectedNumber]
   });
   const end=new Date().toISOString().slice(0,10);const startDate=new Date();startDate.setDate(startDate.getDate()-29);
   let initialSync;try{initialSync=await syncMetaAnalytics(startDate.toISOString().slice(0,10),end,companyId);}catch(error){persistMetaConfig(companyId,{...storedMetaConfig(companyId),analyticsSyncError:error.message,lastAnalyticsSyncAttemptAt:now()});initialSync={synced:false,points:0,warning:error.message};}

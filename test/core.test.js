@@ -377,9 +377,9 @@ test('Embedded Signup conecta um cliente em um fluxo e valida que o número pert
   const context={user:{id:1,role:'admin',companyRole:'owner',companyId}};const originalFetch=globalThis.fetch;const requests=[];
   globalThis.fetch=async(url,options={})=>{const address=String(url);requests.push({address,options});
     if(address.includes('/oauth/access_token'))return {ok:true,json:async()=>({access_token:'embedded-client-token'})};
-    if(address.includes('/444444/phone_numbers'))return {ok:true,json:async()=>({data:[{id:'555555',verified_name:'Cliente Embedded',display_phone_number:'+55 11 95555-5555',quality_rating:'GREEN'}]})};
+    if(address.includes('/444444/phone_numbers'))return {ok:true,json:async()=>({data:[{id:'555555',verified_name:'Cliente Embedded',display_phone_number:'+55 11 95555-5555',quality_rating:'GREEN'},{id:'666666',verified_name:'Cliente Comercial',display_phone_number:'+55 11 96666-6666',quality_rating:'GREEN'}]})};
     if(address.includes('/444444/subscribed_apps'))return {ok:true,json:async()=>({success:true})};
-    if(address.includes('/555555/register'))return {ok:true,json:async()=>({success:true})};
+    if(address.includes('/555555/register')||address.includes('/666666/register'))return {ok:true,json:async()=>({success:true})};
     if(address.includes('/444444?'))return {ok:true,json:async()=>({id:'444444',name:'WABA Cliente'})};
     return {ok:false,json:async()=>({error:{message:'requisição inesperada'}})};
   };
@@ -390,6 +390,11 @@ test('Embedded Signup conecta um cliente em um fluxo e valida que o número pert
     assert.ok(requests.some(item=>item.address.includes('/444444/subscribed_apps')&&item.options.method==='POST'));
     const registration=requests.find(item=>item.address.includes('/555555/register'));assert.match(JSON.parse(registration.options.body).pin,/^\d{6}$/);
     assert.equal(publicMetaConfig(companyId).display_phone_number,'+55 11 95555-5555');
+    const second=await routeApi({method:'POST'},null,new URL('http://local/api/meta/whatsapp/embedded-signup'),{code:'one-time-code-3',waba_id:'444444',phone_number_id:'666666'},context);
+    assert.equal(second.whatsapp_numbers.length,2);assert.equal(second.whatsapp_numbers.find(number=>number.phone_number_id==='666666').active,true);
+    const switched=await routeApi({method:'PUT'},null,new URL('http://local/api/meta/whatsapp/numbers/active'),{phone_number_id:'555555'},context);
+    assert.equal(switched.whatsapp_numbers.find(number=>number.phone_number_id==='555555').active,true);
+    assert.equal(switched.display_phone_number,'+55 11 95555-5555');
   }finally{globalThis.fetch=originalFetch;for(const [key,value] of Object.entries(previous)){if(value===undefined)delete process.env[key];else process.env[key]=value;}}
 });
 
