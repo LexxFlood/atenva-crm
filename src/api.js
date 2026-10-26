@@ -1395,27 +1395,32 @@ export async function routeApi(request, response, url, body, context) {
   }
   if (method === 'POST' && path === '/api/users') {
     if (!context.user.isMaster) throw Object.assign(new Error('Use convites para adicionar pessoas à empresa.'), { statusCode: 403 });
-    const name = String(body.name || '').trim().slice(0, 120);
-    const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
-    const password = String(body.password || '');
-    const role = ['admin', 'manager', 'agent'].includes(body.role) ? body.role : 'agent';
-    const companyId = parseId(body.company_id || context.user.companyId);
-    if (name.length < 2) throw Object.assign(new Error('Informe o nome do usuário'), { statusCode: 400 });
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw Object.assign(new Error('Informe um e-mail válido'), { statusCode: 400 });
-    if (password.length < 10 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
-      throw Object.assign(new Error('A senha precisa ter 10 caracteres, letra maiúscula, minúscula e número'), { statusCode: 400 });
+    const requestedUsers = Array.isArray(body.users) && body.users.length ? body.users.slice(0, 20) : [body];
+    const normalized = requestedUsers.map(item => ({
+      name: String(item.name || '').trim().slice(0, 120),
+      email: String(item.email || '').trim().toLowerCase().slice(0, 254),
+      password: String(item.password || ''),
+      role: ['admin', 'manager', 'agent'].includes(item.role) ? item.role : 'agent',
+      companyId: parseId(item.company_id || context.user.companyId)
+    }));
+    if (normalized.some(item => item.name.length < 2)) throw Object.assign(new Error('Informe o nome de cada usuário'), { statusCode: 400 });
+    if (normalized.some(item => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email))) throw Object.assign(new Error('Informe um e-mail válido para cada usuário'), { statusCode: 400 });
+    if (normalized.some(item => item.password.length < 10 || !/[a-z]/.test(item.password) || !/[A-Z]/.test(item.password) || !/\d/.test(item.password))) {
+      throw Object.assign(new Error('Cada senha precisa ter 10 caracteres, letra maiúscula, minúscula e número'), { statusCode: 400 });
     }
-    if (get('SELECT id FROM users WHERE lower(email)=?', [email])) throw Object.assign(new Error('Já existe um usuário com este e-mail'), { statusCode: 409 });
-    if (!get('SELECT id FROM company_profiles WHERE id=?', [companyId])) throw Object.assign(new Error('Selecione uma empresa válida'), { statusCode: 400 });
-    const result = transaction(() => {
+    if (new Set(normalized.map(item => item.email)).size !== normalized.length) throw Object.assign(new Error('Não repita o mesmo e-mail'), { statusCode: 400 });
+    if (normalized.some(item => get('SELECT id FROM users WHERE lower(email)=?', [item.email]))) throw Object.assign(new Error('Um dos e-mails já possui acesso'), { statusCode: 409 });
+    if (normalized.some(item => !get('SELECT id FROM company_profiles WHERE id=?', [item.companyId]))) throw Object.assign(new Error('Selecione uma empresa válida'), { statusCode: 400 });
+    const createdIds = transaction(() => normalized.map(item => {
       const created = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active,active_company_id)
-        VALUES (?,?,?,?,?,'online',1,?)`, [name, email, hashPassword(password), role, name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), companyId]);
+        VALUES (?,?,?,?,?,'online',1,?)`, [item.name, item.email, hashPassword(item.password), item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.companyId]);
       const userId = Number(created.lastInsertRowid);
       run(`INSERT INTO user_company_memberships (company_id,user_id,role,is_active,invited_by)
-        VALUES (?,?,?,1,?)`, [companyId, userId, role, context.user.id]);
-      return created;
-    });
-    return get('SELECT id,name,email,role,avatar,status,is_active FROM users WHERE id=?', [Number(result.lastInsertRowid)]);
+        VALUES (?,?,?,1,?)`, [item.companyId, userId, item.role, context.user.id]);
+      return userId;
+    }));
+    const createdUsers = createdIds.map(id => get('SELECT id,name,email,role,avatar,status,is_active FROM users WHERE id=?', [id]));
+    return requestedUsers.length === 1 ? createdUsers[0] : { users: createdUsers };
   }
 
   match = path.match(/^\/api\/users\/(\d+)$/);

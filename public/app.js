@@ -1458,6 +1458,9 @@ async function renderAdministration() {
       <label>Senha provisória<input name="password" type="password" required minlength="10" autocomplete="new-password" /></label>
       <label>Permissão<select name="role"><option value="admin" selected>Administrador</option><option value="manager">Gestor</option><option value="agent">Atendente</option></select></label>
       <label>Empresa<select name="company_id">${companyOptions}</select></label>
+      <label>Segundo nome (opcional)<input name="name_2" maxlength="120" autocomplete="off" /></label>
+      <label>Segundo e-mail (opcional)<input name="email_2" type="email" autocomplete="off" /></label>
+      <label>Segunda senha provisória<input name="password_2" type="password" minlength="10" autocomplete="new-password" /></label>
       <div class="full admin-form-actions"><button class="primary-button" type="submit">${icon('plus')} Criar e ativar acesso</button></div>
     </form>
   </div></details>` : '';
@@ -1499,7 +1502,7 @@ async function renderAdministration() {
   document.querySelector('#admin-direct-form')?.addEventListener('submit', async event => {
     event.preventDefault();
     const form=event.currentTarget;const button=form.querySelector('[type=submit]');button.disabled=true;
-    try{await api('/api/users',{method:'POST',body:Object.fromEntries(new FormData(form))});toast('Acesso criado','O administrador já pode entrar no Atenva.');await renderAdministration();document.querySelector('#admin-users').open=true;}
+    try{const data=Object.fromEntries(new FormData(form));const users=[{name:data.name,email:data.email,password:data.password,role:data.role,company_id:data.company_id}];if(data.email_2)users.push({name:data.name_2,email:data.email_2,password:data.password_2,role:data.role,company_id:data.company_id});await api('/api/users',{method:'POST',body:{users}});toast(users.length>1?'Acessos criados':'Acesso criado',users.length>1?'Os administradores já podem entrar no Atenva.':'O administrador já pode entrar no Atenva.');await renderAdministration();document.querySelector('#admin-users').open=true;}
     catch(error){toast('Não foi possível criar o acesso',error.message,'error');}
     finally{button.disabled=false;}
   });
