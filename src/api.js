@@ -1409,14 +1409,21 @@ export async function routeApi(request, response, url, body, context) {
       throw Object.assign(new Error('Cada senha precisa ter 10 caracteres, letra maiúscula, minúscula e número'), { statusCode: 400 });
     }
     if (new Set(normalized.map(item => item.email)).size !== normalized.length) throw Object.assign(new Error('Não repita o mesmo e-mail'), { statusCode: 400 });
-    if (normalized.some(item => get('SELECT id FROM users WHERE lower(email)=?', [item.email]))) throw Object.assign(new Error('Um dos e-mails já possui acesso'), { statusCode: 409 });
     if (normalized.some(item => !get('SELECT id FROM company_profiles WHERE id=?', [item.companyId]))) throw Object.assign(new Error('Selecione uma empresa válida'), { statusCode: 400 });
     const createdIds = transaction(() => normalized.map(item => {
-      const created = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active,active_company_id)
-        VALUES (?,?,?,?,?,'online',1,?)`, [item.name, item.email, hashPassword(item.password), item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.companyId]);
-      const userId = Number(created.lastInsertRowid);
+      const existing = get('SELECT id FROM users WHERE lower(email)=?', [item.email]);
+      let userId;
+      if (existing) {
+        userId = Number(existing.id);
+        run(`UPDATE users SET name=?,password_hash=?,role=?,avatar=?,status='online',is_active=1,active_company_id=? WHERE id=?`,
+          [item.name, hashPassword(item.password), item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.companyId, userId]);
+      } else {
+        const created = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active,active_company_id)
+          VALUES (?,?,?,?,?,'online',1,?)`, [item.name, item.email, hashPassword(item.password), item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.companyId]);
+        userId = Number(created.lastInsertRowid);
+      }
       run(`INSERT INTO user_company_memberships (company_id,user_id,role,is_active,invited_by)
-        VALUES (?,?,?,1,?)`, [item.companyId, userId, item.role, context.user.id]);
+        VALUES (?,?,?,1,?) ON CONFLICT(company_id,user_id) DO UPDATE SET role=excluded.role,is_active=1,invited_by=excluded.invited_by`, [item.companyId, userId, item.role, context.user.id]);
       return userId;
     }));
     const createdUsers = createdIds.map(id => get('SELECT id,name,email,role,avatar,status,is_active FROM users WHERE id=?', [id]));
