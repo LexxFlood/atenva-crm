@@ -1451,6 +1451,16 @@ async function renderAdministration() {
   const roleLabels = { master: 'Onboarding Manager', owner: 'Proprietário', admin: 'Administrador', manager: 'Gestor', agent: 'Atendente' };
   const statusLabel = invitation => invitation.revoked_at ? 'Revogado' : invitation.accepted_at ? 'Aceito' : new Date(invitation.expires_at) < new Date() ? 'Expirado' : 'Pendente';
   const companyOptions = state.companies.map(company => `<option value="${company.id}" ${Number(company.id) === Number(state.user?.companyId) ? 'selected' : ''}>${escapeHtml(company.name)}</option>`).join('');
+  const directAccessPanel = isMaster ? `<details class="admin-section" id="admin-direct-access"><summary><span class="admin-section-icon">${icon('user-plus')}</span><span><strong>Criar acesso direto</strong><small>Ative um administrador com senha provisória</small></span>${icon('chevron')}</summary><div class="admin-section-body">
+    <form class="config-form" id="admin-direct-form">
+      <label>Nome<input name="name" required maxlength="120" autocomplete="off" /></label>
+      <label>E-mail<input name="email" type="email" required autocomplete="off" /></label>
+      <label>Senha provisória<input name="password" type="password" required minlength="10" autocomplete="new-password" /></label>
+      <label>Permissão<select name="role"><option value="admin" selected>Administrador</option><option value="manager">Gestor</option><option value="agent">Atendente</option></select></label>
+      <label>Empresa<select name="company_id">${companyOptions}</select></label>
+      <div class="full admin-form-actions"><button class="primary-button" type="submit">${icon('plus')} Criar e ativar acesso</button></div>
+    </form>
+  </div></details>` : '';
   const planLabels = { starter:'Inicial', business:'Profissional', scale:'Escala' };
   const tenantPanel = isMaster ? `<details class="admin-section client-provision-panel" id="admin-clients"><summary><span class="admin-section-icon">${icon('building')}</span><span><strong>Clientes e ambientes</strong><small>Cadastre um cliente ou gerencie plano, usuários e status</small></span><span class="stage-badge">${state.companies.length} clientes</span>${icon('chevron')}</summary><div class="admin-section-body"><div class="admin-section-heading"><h3>Novo cliente</h3><p>Crie o ambiente isolado e o primeiro acesso administrativo em uma única etapa.</p></div>
     <form class="config-form client-provision-form" id="client-provision-form">
@@ -1469,6 +1479,7 @@ async function renderAdministration() {
     <div class="admin-quick-grid"><button type="button" data-open-admin="admin-users">${icon('users')}<span><strong>Usuários</strong><small>${state.users.length} acessos ativos</small></span></button><button type="button" data-open-admin="admin-invites">${icon('send')}<span><strong>Convites</strong><small>${state.invitations.length} registros</small></span></button>${isMaster?`<button type="button" data-open-admin="admin-clients">${icon('building')}<span><strong>Clientes</strong><small>${state.companies.length} ambientes</small></span></button>`:''}<button type="button" id="admin-text-size">${icon('text')}<span><strong>Tamanho do texto</strong><small>Ajustar leitura do sistema</small></span></button></div>
     ${tenantPanel}
     <div class="admin-access-grid">
+      ${directAccessPanel}
       <details class="admin-section" id="admin-invites"><summary><span class="admin-section-icon">${icon('send')}</span><span><strong>Convidar novo usuário</strong><small>Crie um link individual válido por 7 dias</small></span>${icon('chevron')}</summary><div class="admin-section-body">
         <form class="config-form" id="admin-invite-form">
           <label class="full">E-mail da pessoa<input name="email" type="email" autocomplete="off" placeholder="nome@empresa.com" required /></label>
@@ -1485,6 +1496,13 @@ async function renderAdministration() {
   document.querySelectorAll('[data-open-admin]').forEach(button=>button.addEventListener('click',()=>{const section=document.querySelector(`#${button.dataset.openAdmin}`);if(section){section.open=true;section.scrollIntoView({behavior:'smooth',block:'start'});}}));
   document.querySelectorAll('.admin-section').forEach(section=>section.addEventListener('toggle',()=>{if(!section.open)return;document.querySelectorAll('.admin-section').forEach(other=>{if(other!==section)other.open=false;});}));
   document.querySelector('#admin-text-size')?.addEventListener('click',openTextSizeSettings);
+  document.querySelector('#admin-direct-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget;const button=form.querySelector('[type=submit]');button.disabled=true;
+    try{await api('/api/users',{method:'POST',body:Object.fromEntries(new FormData(form))});toast('Acesso criado','O administrador já pode entrar no Atenva.');await renderAdministration();document.querySelector('#admin-users').open=true;}
+    catch(error){toast('Não foi possível criar o acesso',error.message,'error');}
+    finally{button.disabled=false;}
+  });
   const provisionForm = document.querySelector('#client-provision-form');
   provisionForm?.addEventListener('submit', async event => {
     event.preventDefault();

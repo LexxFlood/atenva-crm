@@ -1399,14 +1399,22 @@ export async function routeApi(request, response, url, body, context) {
     const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
     const password = String(body.password || '');
     const role = ['admin', 'manager', 'agent'].includes(body.role) ? body.role : 'agent';
+    const companyId = parseId(body.company_id || context.user.companyId);
     if (name.length < 2) throw Object.assign(new Error('Informe o nome do usuário'), { statusCode: 400 });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw Object.assign(new Error('Informe um e-mail válido'), { statusCode: 400 });
     if (password.length < 10 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password)) {
       throw Object.assign(new Error('A senha precisa ter 10 caracteres, letra maiúscula, minúscula e número'), { statusCode: 400 });
     }
     if (get('SELECT id FROM users WHERE lower(email)=?', [email])) throw Object.assign(new Error('Já existe um usuário com este e-mail'), { statusCode: 409 });
-    const result = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active)
-      VALUES (?,?,?,?,?,'online',1)`, [name, email, hashPassword(password), role, name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()]);
+    if (!get('SELECT id FROM company_profiles WHERE id=?', [companyId])) throw Object.assign(new Error('Selecione uma empresa válida'), { statusCode: 400 });
+    const result = transaction(() => {
+      const created = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active,active_company_id)
+        VALUES (?,?,?,?,?,'online',1,?)`, [name, email, hashPassword(password), role, name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), companyId]);
+      const userId = Number(created.lastInsertRowid);
+      run(`INSERT INTO user_company_memberships (company_id,user_id,role,is_active,invited_by)
+        VALUES (?,?,?,1,?)`, [companyId, userId, role, context.user.id]);
+      return created;
+    });
     return get('SELECT id,name,email,role,avatar,status,is_active FROM users WHERE id=?', [Number(result.lastInsertRowid)]);
   }
 
