@@ -1409,6 +1409,9 @@ export async function routeApi(request, response, url, body, context) {
       throw Object.assign(new Error('Cada senha precisa ter 10 caracteres, letra maiúscula, minúscula e número'), { statusCode: 400 });
     }
     if (new Set(normalized.map(item => item.email)).size !== normalized.length) throw Object.assign(new Error('Não repita o mesmo e-mail'), { statusCode: 400 });
+    const existingUsers = normalized.map(item => get('SELECT id,is_master FROM users WHERE lower(email)=?', [item.email]));
+    if (existingUsers.some(user => user?.is_master)) throw Object.assign(new Error('Um Onboarding Manager não pode ser redefinido por este formulário'), { statusCode: 403 });
+    if (existingUsers.some(Boolean) && body.replace_existing !== true) throw Object.assign(new Error('Um dos e-mails já possui acesso. Confirme a redefinição para continuar'), { statusCode: 409 });
     if (normalized.some(item => !get('SELECT id FROM company_profiles WHERE id=?', [item.companyId]))) throw Object.assign(new Error('Selecione uma empresa válida'), { statusCode: 400 });
     const createdIds = transaction(() => normalized.map(item => {
       const existing = get('SELECT id FROM users WHERE lower(email)=?', [item.email]);
@@ -1424,6 +1427,7 @@ export async function routeApi(request, response, url, body, context) {
       }
       run(`INSERT INTO user_company_memberships (company_id,user_id,role,is_active,invited_by)
         VALUES (?,?,?,1,?) ON CONFLICT(company_id,user_id) DO UPDATE SET role=excluded.role,is_active=1,invited_by=excluded.invited_by`, [item.companyId, userId, item.role, context.user.id]);
+      if (existing) run(`INSERT INTO security_events (user_id,event_type,details) VALUES (?, 'admin_access_reset', ?)`, [context.user.id, JSON.stringify({ target_user_id:userId,company_id:item.companyId })]);
       return userId;
     }));
     const createdUsers = createdIds.map(id => get('SELECT id,name,email,role,avatar,status,is_active FROM users WHERE id=?', [id]));
