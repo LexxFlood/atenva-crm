@@ -1400,7 +1400,7 @@ export async function routeApi(request, response, url, body, context) {
       name: String(item.name || '').trim().slice(0, 120),
       email: String(item.email || '').trim().toLowerCase().slice(0, 254),
       password: String(item.password || ''),
-      role: ['admin', 'manager', 'agent'].includes(item.role) ? item.role : 'agent',
+      role: ['master', 'admin', 'manager', 'agent'].includes(item.role) ? item.role : 'agent',
       companyId: parseId(item.company_id || context.user.companyId)
     }));
     if (normalized.some(item => item.name.length < 2)) throw Object.assign(new Error('Informe o nome de cada usuário'), { statusCode: 400 });
@@ -1418,15 +1418,15 @@ export async function routeApi(request, response, url, body, context) {
       let userId;
       if (existing) {
         userId = Number(existing.id);
-        run(`UPDATE users SET name=?,password_hash=?,role=?,avatar=?,status='online',is_active=1,active_company_id=? WHERE id=?`,
-          [item.name, hashPassword(item.password), item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.companyId, userId]);
+        run(`UPDATE users SET name=?,password_hash=?,role=?,avatar=?,status='online',is_active=1,is_master=?,active_company_id=? WHERE id=?`,
+          [item.name, hashPassword(item.password), item.role === 'master' ? 'admin' : item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.role === 'master' ? 1 : 0, item.companyId, userId]);
       } else {
-        const created = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active,active_company_id)
-          VALUES (?,?,?,?,?,'online',1,?)`, [item.name, item.email, hashPassword(item.password), item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.companyId]);
+        const created = run(`INSERT INTO users (name,email,password_hash,role,avatar,status,is_active,is_master,active_company_id)
+          VALUES (?,?,?,?,?,'online',1,?,?)`, [item.name, item.email, hashPassword(item.password), item.role === 'master' ? 'admin' : item.role, item.name.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase(), item.role === 'master' ? 1 : 0, item.companyId]);
         userId = Number(created.lastInsertRowid);
       }
       run(`INSERT INTO user_company_memberships (company_id,user_id,role,is_active,invited_by)
-        VALUES (?,?,?,1,?) ON CONFLICT(company_id,user_id) DO UPDATE SET role=excluded.role,is_active=1,invited_by=excluded.invited_by`, [item.companyId, userId, item.role, context.user.id]);
+        VALUES (?,?,?,1,?) ON CONFLICT(company_id,user_id) DO UPDATE SET role=excluded.role,is_active=1,invited_by=excluded.invited_by`, [item.companyId, userId, item.role === 'master' ? 'owner' : item.role, context.user.id]);
       if (existing) run(`INSERT INTO security_events (user_id,event_type,details) VALUES (?, 'admin_access_reset', ?)`, [context.user.id, JSON.stringify({ target_user_id:userId,company_id:item.companyId })]);
       return userId;
     }));

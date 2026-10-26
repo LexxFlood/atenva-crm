@@ -1456,7 +1456,7 @@ async function renderAdministration() {
       <label>Nome<input name="name" required maxlength="120" autocomplete="off" /></label>
       <label>E-mail<input name="email" type="email" required autocomplete="off" /></label>
       <label>Senha provisória<input name="password" type="password" required minlength="10" autocomplete="new-password" /></label>
-      <label>Permissão<select name="role"><option value="admin" selected>Administrador</option><option value="manager">Gestor</option><option value="agent">Atendente</option></select></label>
+      <label>Permissão<select name="role"><option value="master">Onboarding Manager Atenva</option><option value="admin" selected>Administrador</option><option value="manager">Gestor</option><option value="agent">Atendente</option></select></label>
       <label>Empresa<select name="company_id">${companyOptions}</select></label>
       <label>Segundo nome (opcional)<input name="name_2" maxlength="120" autocomplete="off" /></label>
       <label>Segundo e-mail (opcional)<input name="email_2" type="email" autocomplete="off" /></label>
