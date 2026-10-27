@@ -32,6 +32,16 @@ for (const [column, statement] of userMigrations) {
 const primaryCompanyName = String(process.env.PRIMARY_COMPANY_NAME || 'Atenva').trim().slice(0, 120) || 'Atenva';
 const primaryCompanySlug = String(process.env.PRIMARY_COMPANY_SLUG || 'atenva-demo').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '').slice(0, 120) || 'atenva-demo';
 db.prepare(`INSERT OR IGNORE INTO company_profiles (id,name,slug,status) VALUES (1,?,?, 'active')`).run(primaryCompanyName, primaryCompanySlug);
+
+function normalizeCanonicalCompanySlugs(database) {
+  // Migração de endereço: preserva o mesmo company_id e, portanto, todos os
+  // contatos, conversas, funis, tarefas e integrações ligados à Mais Tração.
+  const legacy = database.prepare("SELECT id FROM company_profiles WHERE slug='mais-tracao-gestao-de-trafego'").get();
+  const canonical = database.prepare("SELECT id FROM company_profiles WHERE slug='mais-tracao'").get();
+  if (legacy && !canonical) database.prepare("UPDATE company_profiles SET slug='mais-tracao',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(legacy.id);
+}
+
+normalizeCanonicalCompanySlugs(db);
 db.prepare(`INSERT OR IGNORE INTO user_company_memberships (company_id,user_id,role,is_active)
   SELECT 1,id,CASE WHEN role='admin' THEN 'owner' ELSE role END,1 FROM users`).run();
 db.prepare(`UPDATE users SET active_company_id=1 WHERE active_company_id IS NULL`).run();
@@ -309,6 +319,7 @@ export async function reloadDatabaseFromSnapshot(leaseToken = '') {
     const hydrated = await hydrateDatabaseFile(databasePath, leaseToken);
     db = new DatabaseSync(databasePath);
     db.exec('PRAGMA foreign_keys=ON');
+    normalizeCanonicalCompanySlugs(db);
     return hydrated;
   } catch (error) {
     db = new DatabaseSync(databasePath);

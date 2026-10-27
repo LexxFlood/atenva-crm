@@ -9,12 +9,11 @@ import { verifyChallenge, verifySignature } from './src/whatsapp.js';
 import { authenticate, clearCookie, ensureAdminCredentials, login, logout, promoteConfiguredMasters, refreshCookie } from './src/auth.js';
 import { completeMetaAuthorization, metaIsConfigured, metaOauthStatus, verifyMetaLeadChallenge, verifyMetaLeadSignature } from './src/integrations.js';
 import { recalculateQualifications } from './src/qualification.js';
-import { db, databasePath, get, reloadDatabaseFromSnapshot, run } from './src/db.js';
+import { db, databasePath, get, reloadDatabaseFromSnapshot } from './src/db.js';
 import { persistDatabaseSnapshot, withSynchronizedDatabase } from './src/remote-snapshot.js';
 import { evolutionConfig, evolutionIsConfigured, evolutionStatus } from './src/evolution.js';
 import { completeGoogleAuthorization } from './src/google-calendar.js';
-import { agentModelStatus, ensureCompanyAgentConfig } from './src/agent.js';
-import { ensureCompanyQualificationConfig } from './src/qualification.js';
+import { agentModelStatus } from './src/agent.js';
 import { runWithRequestContext } from './src/request-context.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -22,28 +21,7 @@ const publicDir = join(root, 'public');
 const port = Number(process.env.PORT || 3210);
 seed();
 ensureAdminCredentials();
-provisionMaisTracaoProfiles();
 recalculateQualifications();
-
-function provisionMaisTracaoProfiles() {
-  if (process.env.TENANT_MODE !== 'mais-tracao') return;
-  const master = get('SELECT id FROM users WHERE is_master=1 AND is_active=1 ORDER BY id LIMIT 1');
-  if (!master) return;
-  const profiles = [
-    ['Mais Tração · Gestão de Tráfego', 'mais-tracao-gestao-de-trafego'],
-    ['Produtora Mais Tração', 'produtora-mais-tracao']
-  ];
-  for (const [name, slug] of profiles) {
-    let company = get('SELECT id FROM company_profiles WHERE slug=?', [slug]);
-    if (!company) {
-      const created = run(`INSERT INTO company_profiles (name,slug,status,created_by) VALUES (?,?,'active',?)`, [name, slug, master.id]);
-      company = { id: Number(created.lastInsertRowid) };
-    }
-    run(`INSERT OR IGNORE INTO user_company_memberships (company_id,user_id,role,is_active,invited_by) VALUES (?,?,'owner',1,?)`, [company.id, master.id, master.id]);
-    ensureCompanyAgentConfig(company.id);
-    ensureCompanyQualificationConfig(company.id);
-  }
-}
 
 const rateBuckets = new Map();
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

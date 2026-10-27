@@ -72,7 +72,9 @@ function resetCompanyScopedState() {
 }
 
 const entryProfiles = {
-  '/gestao-mais-tracao': { slug: 'mais-tracao-gestao-de-trafego', title: 'Mais Tração · Gestão de Tráfego', description: 'Acesse o CRM da Mais Tração para acompanhar mídia, leads e oportunidades.' },
+  '/mais-tracao': { slug: 'mais-tracao', title: 'Mais Tração · Gestão de Tráfego', description: 'Acesse o CRM da Mais Tração para acompanhar mídia, leads e oportunidades.' },
+  '/gestao-mais-tracao': { slug: 'mais-tracao', title: 'Mais Tração · Gestão de Tráfego', description: 'Acesse o CRM da Mais Tração para acompanhar mídia, leads e oportunidades.' },
+  '/mais-tracao-gestao-de-trafego': { slug: 'mais-tracao', title: 'Mais Tração · Gestão de Tráfego', description: 'Acesse o CRM da Mais Tração para acompanhar mídia, leads e oportunidades.' },
   '/produtora-mais-tracao': { slug: 'produtora-mais-tracao', title: 'Produtora Mais Tração', description: 'Acesse o CRM da Produtora Mais Tração para acompanhar projetos, leads e oportunidades.' }
 };
 
