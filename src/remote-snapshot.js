@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 function configuration() {
@@ -18,6 +19,8 @@ function headers(config, additional = {}) {
 
 const retryDelays = [0, 200, 500, 1_000, 2_000];
 let pendingPersistence = Promise.resolve();
+let pendingRequest = Promise.resolve();
+let activeLeaseToken = '';
 
 function wait(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -44,11 +47,11 @@ async function fetchWithRetry(url, options = {}) {
   throw lastError || new Error('Serviço de persistência indisponível');
 }
 
-export async function hydrateDatabaseFile(databasePath) {
+export async function hydrateDatabaseFile(databasePath, leaseToken = '') {
   const config = configuration();
   if (!config) return false;
   const response = await fetchWithRetry(`${config.endpoint}?company=${encodeURIComponent(config.company)}`, {
-    headers: headers(config)
+    headers: headers(config, leaseToken ? { 'x-atenva-snapshot-lease': leaseToken } : {})
   });
   if (response.status === 404) return false;
   if (!response.ok) throw new Error(`Falha ao carregar banco persistente (${response.status})`);
@@ -65,7 +68,10 @@ export async function persistDatabaseSnapshot(databasePath, database) {
     database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     const response = await fetchWithRetry(`${config.endpoint}?company=${encodeURIComponent(config.company)}`, {
       method: 'PUT',
-      headers: headers(config, { 'content-type': 'application/octet-stream' }),
+      headers: headers(config, {
+        'content-type': 'application/octet-stream',
+        ...(activeLeaseToken ? { 'x-atenva-snapshot-lease': activeLeaseToken } : {})
+      }),
       body: readFileSync(databasePath)
     });
     if (!response.ok) throw new Error(`Falha ao salvar banco persistente (${response.status})`);
@@ -75,4 +81,65 @@ export async function persistDatabaseSnapshot(databasePath, database) {
   // Evita que duas mutações simultâneas disputem o mesmo snapshot no Supabase.
   pendingPersistence = pendingPersistence.catch(() => {}).then(operation);
   return pendingPersistence;
+}
+
+async function acquireDatabaseLease() {
+  const config = configuration();
+  if (!config) return null;
+  const owner = randomUUID();
+  const delays = [0, 100, 250, 500, 1_000, 2_000, 4_000, 6_000];
+  let lastError;
+  for (const delay of delays) {
+    if (delay) await wait(delay);
+    const response = await fetch(`${config.endpoint}?action=acquire&company=${encodeURIComponent(config.company)}`, {
+      method: 'POST',
+      headers: headers(config, { 'content-type': 'application/json' }),
+      body: JSON.stringify({ owner })
+    });
+    if (response.status === 423) {
+      lastError = new Error('Outro processo está atualizando os dados. Tentando novamente.');
+      continue;
+    }
+    if (!response.ok) throw new Error(`Falha ao reservar banco persistente (${response.status})`);
+    const payload = await response.json();
+    if (!payload?.lease) throw new Error('Serviço de persistência não retornou a reserva do banco.');
+    return { config, token: payload.lease };
+  }
+  throw lastError || new Error('Banco persistente ocupado. Tente novamente em instantes.');
+}
+
+async function releaseDatabaseLease(lease) {
+  if (!lease) return;
+  await fetchWithRetry(`${lease.config.endpoint}?action=release&company=${encodeURIComponent(lease.config.company)}`, {
+    method: 'DELETE',
+    headers: headers(lease.config, { 'x-atenva-snapshot-lease': lease.token })
+  }).then(async response => {
+    if (!response.ok && response.status !== 404) {
+      await response.arrayBuffer().catch(() => {});
+      throw new Error(`Falha ao liberar banco persistente (${response.status})`);
+    }
+  });
+}
+
+// Serializa o acesso SQLite dentro da instância e usa uma reserva distribuída
+// para mutações. Assim, duas Functions nunca sobrescrevem snapshots uma da outra.
+export function withSynchronizedDatabase({ write = false, reload }, callback) {
+  const operation = async () => {
+    const lease = write ? await acquireDatabaseLease() : null;
+    activeLeaseToken = lease?.token || '';
+    try {
+      await reload(activeLeaseToken);
+      return await callback();
+    } finally {
+      activeLeaseToken = '';
+      try {
+        await releaseDatabaseLease(lease);
+      } catch (error) {
+        console.error('Não foi possível liberar imediatamente a reserva do snapshot:', error);
+      }
+    }
+  };
+  const result = pendingRequest.catch(() => {}).then(operation);
+  pendingRequest = result.then(() => undefined, () => undefined);
+  return result;
 }

@@ -9,8 +9,8 @@ import { verifyChallenge, verifySignature } from './src/whatsapp.js';
 import { authenticate, clearCookie, ensureAdminCredentials, login, logout, refreshCookie } from './src/auth.js';
 import { completeMetaAuthorization, metaIsConfigured, metaOauthStatus, verifyMetaLeadChallenge, verifyMetaLeadSignature } from './src/integrations.js';
 import { recalculateQualifications } from './src/qualification.js';
-import { db, databasePath, get, run } from './src/db.js';
-import { persistDatabaseSnapshot } from './src/remote-snapshot.js';
+import { db, databasePath, get, reloadDatabaseFromSnapshot, run } from './src/db.js';
+import { persistDatabaseSnapshot, withSynchronizedDatabase } from './src/remote-snapshot.js';
 import { evolutionConfig, evolutionIsConfigured, evolutionStatus } from './src/evolution.js';
 import { completeGoogleAuthorization } from './src/google-calendar.js';
 import { agentModelStatus, ensureCompanyAgentConfig } from './src/agent.js';
@@ -136,7 +136,7 @@ function serveStatic(response, pathname) {
   response.end(content);
 }
 
-const server = createServer((request, response) => runWithRequestContext(request, async () => {
+async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   const ip = clientIp(request);
   try {
@@ -263,6 +263,24 @@ const server = createServer((request, response) => runWithRequestContext(request
   } catch (error) {
     console.error(error);
     sendJson(response, error.statusCode || 500, { error: error.message || 'Erro interno' });
+  }
+}
+
+const server = createServer((request, response) => runWithRequestContext(request, async () => {
+  const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  if (!url.pathname.startsWith('/api/')) return handleRequest(request, response);
+  const writesDatabase = unsafeMethods.has(request.method)
+    || url.pathname === '/api/cron/scheduled-messages'
+    || url.pathname === '/api/integrations/google/callback'
+    || url.pathname === '/api/integrations/meta/callback';
+  try {
+    return await withSynchronizedDatabase(
+      { write: writesDatabase, reload: reloadDatabaseFromSnapshot },
+      () => handleRequest(request, response)
+    );
+  } catch (error) {
+    console.error(error);
+    if (!response.headersSent) return sendJson(response, 503, { error: 'Dados temporariamente indisponíveis. Tente novamente.' });
   }
 }));
 

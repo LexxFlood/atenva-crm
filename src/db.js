@@ -11,7 +11,7 @@ export const databasePath = process.env.DATABASE_PATH || (process.env.VERCEL ? j
 mkdirSync(dirname(databasePath), { recursive: true });
 await hydrateDatabaseFile(databasePath);
 
-export const db = new DatabaseSync(databasePath);
+export let db = new DatabaseSync(databasePath);
 db.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
 
 // Migra bancos criados por versões anteriores sem apagar dados do cliente.
@@ -300,4 +300,19 @@ export function ensureCompanyPipelines(companyId, templateCompanyId = 1) {
 
 export function closeDatabase() {
   db.close();
+}
+
+export async function reloadDatabaseFromSnapshot(leaseToken = '') {
+  if (!process.env.SUPABASE_SNAPSHOT_URL) return false;
+  db.close();
+  try {
+    const hydrated = await hydrateDatabaseFile(databasePath, leaseToken);
+    db = new DatabaseSync(databasePath);
+    db.exec('PRAGMA foreign_keys=ON');
+    return hydrated;
+  } catch (error) {
+    db = new DatabaseSync(databasePath);
+    db.exec('PRAGMA foreign_keys=ON');
+    throw error;
+  }
 }
