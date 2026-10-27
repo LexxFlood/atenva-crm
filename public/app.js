@@ -85,8 +85,10 @@ function entryProfile() {
   if (legacyDynamic) return { slug: legacyDynamic[1], title: null, description: null, dynamic: true };
   const cleanDynamic = path.match(/^\/([a-z0-9-]+)$/);
   if (cleanDynamic && !reservedEntryPaths.has(cleanDynamic[1])) return { slug: cleanDynamic[1], title: null, description: null, dynamic: true };
-  const hostParts=location.hostname.toLowerCase().split('.');
-  if(path==='/'&&hostParts.length>=3&&!location.hostname.endsWith('.vercel.app')&&!['www','app','api','hooks'].includes(hostParts[0]))return {slug:hostParts[0],title:null,description:null,dynamic:true,subdomain:true};
+  const hostname=location.hostname.toLowerCase();
+  const hostParts=hostname.split('.');
+  const isAtenvaRoot=hostname==='atenva.com.br'||hostname==='www.atenva.com.br';
+  if(path==='/'&&!isAtenvaRoot&&hostParts.length>=3&&!hostname.endsWith('.vercel.app')&&!['www','app','api','hooks'].includes(hostParts[0]))return {slug:hostParts[0],title:null,description:null,dynamic:true,subdomain:true};
   if (path === '/' && location.hostname.startsWith('mais-tracao-atenva')) return entryProfiles['/gestao-mais-tracao'];
   return null;
 }
