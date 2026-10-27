@@ -81,6 +81,25 @@ export function ensureAdminCredentials() {
   run('UPDATE users SET active_company_id=1 WHERE active_company_id IS NULL');
 }
 
+export function promoteConfiguredMasters() {
+  const emails = String(process.env.BOOTSTRAP_MASTER_EMAILS || '')
+    .split(',')
+    .map(value => value.trim().toLowerCase())
+    .filter(value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
+    .slice(0, 20);
+  let changed = 0;
+  for (const email of new Set(emails)) {
+    const user = get('SELECT id,is_master FROM users WHERE lower(email)=?', [email]);
+    if (!user || user.is_master) continue;
+    run("UPDATE users SET role='admin',is_master=1,is_active=1,status='online' WHERE id=?", [user.id]);
+    run("UPDATE user_company_memberships SET role='owner',is_active=1 WHERE user_id=?", [user.id]);
+    run(`INSERT INTO security_events (user_id,event_type,details) VALUES (?, 'master_access_promoted', ?)`,
+      [user.id, JSON.stringify({ source: 'BOOTSTRAP_MASTER_EMAILS' })]);
+    changed += 1;
+  }
+  return changed;
+}
+
 function parseCookies(header = '') {
   return Object.fromEntries(header.split(';').map(part => part.trim()).filter(Boolean).map(part => {
     const index = part.indexOf('=');

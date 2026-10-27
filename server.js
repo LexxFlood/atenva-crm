@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { processScheduledMessages, routeApi } from './src/api.js';
 import { seed } from './src/seed.js';
 import { verifyChallenge, verifySignature } from './src/whatsapp.js';
-import { authenticate, clearCookie, ensureAdminCredentials, login, logout, refreshCookie } from './src/auth.js';
+import { authenticate, clearCookie, ensureAdminCredentials, login, logout, promoteConfiguredMasters, refreshCookie } from './src/auth.js';
 import { completeMetaAuthorization, metaIsConfigured, metaOauthStatus, verifyMetaLeadChallenge, verifyMetaLeadSignature } from './src/integrations.js';
 import { recalculateQualifications } from './src/qualification.js';
 import { db, databasePath, get, reloadDatabaseFromSnapshot, run } from './src/db.js';
@@ -276,7 +276,10 @@ const server = createServer((request, response) => runWithRequestContext(request
   try {
     return await withSynchronizedDatabase(
       { write: writesDatabase, reload: reloadDatabaseFromSnapshot },
-      () => handleRequest(request, response)
+      () => {
+        if (writesDatabase) promoteConfiguredMasters();
+        return handleRequest(request, response);
+      }
     );
   } catch (error) {
     console.error(error);
