@@ -65,10 +65,54 @@ begin
 end;
 $$;
 
+create or replace function public.read_snapshot_with_lease(p_company_key text, p_lease_token text)
+returns table(database_base64 text)
+language sql
+security definer
+set search_path = ''
+as $$
+  select snapshot.database_base64
+  from public.app_snapshots as snapshot
+  where snapshot.company_key = p_company_key
+    and snapshot.lock_token = p_lease_token
+    and snapshot.lock_expires_at > now();
+$$;
+
+create or replace function public.save_snapshot_with_lease(
+  p_company_key text,
+  p_lease_token text,
+  p_database_base64 text,
+  p_byte_size bigint
+)
+returns bigint
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  saved_version bigint;
+begin
+  update public.app_snapshots as snapshot
+  set database_base64 = p_database_base64,
+      byte_size = p_byte_size,
+      version = snapshot.version + 1,
+      updated_at = now()
+  where snapshot.company_key = p_company_key
+    and snapshot.lock_token = p_lease_token
+    and snapshot.lock_expires_at > now()
+  returning snapshot.version into saved_version;
+  return saved_version;
+end;
+$$;
+
 revoke execute on function public.acquire_snapshot_lease(text,text,integer) from public, anon, authenticated;
 revoke execute on function public.release_snapshot_lease(text,text) from public, anon, authenticated;
+revoke execute on function public.read_snapshot_with_lease(text,text) from public, anon, authenticated;
+revoke execute on function public.save_snapshot_with_lease(text,text,text,bigint) from public, anon, authenticated;
 grant execute on function public.acquire_snapshot_lease(text,text,integer) to service_role;
 grant execute on function public.release_snapshot_lease(text,text) to service_role;
+grant execute on function public.read_snapshot_with_lease(text,text) to service_role;
+grant execute on function public.save_snapshot_with_lease(text,text,text,bigint) to service_role;
 
 insert into public.app_sync_credentials (id, secret_hash)
 values ('vercel-primary', '4578036cc3e44ee09be7e6b0d678ebd378a5eb4e4d44fa5f06108953888100b7')

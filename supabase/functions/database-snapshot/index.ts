@@ -71,9 +71,11 @@ Deno.serve(async request => {
   }
 
   if (request.method === "GET") {
-    let query = client.from("app_snapshots").select("database_base64,lock_token,lock_expires_at").eq("company_key", company);
-    if (leaseToken) query = query.eq("lock_token", leaseToken).gt("lock_expires_at", new Date().toISOString());
-    const { data, error } = await query.maybeSingle();
+    const result = leaseToken
+      ? await client.rpc("read_snapshot_with_lease", { p_company_key: company, p_lease_token: leaseToken })
+      : await client.from("app_snapshots").select("database_base64").eq("company_key", company).maybeSingle();
+    const error = result.error;
+    const data = leaseToken ? result.data?.[0] : result.data;
     if (error) return json(500, { error: error.message });
     if (!data) return json(404, { error: "Snapshot ainda não criado" });
     return new Response(decodeBase64(data.database_base64), { headers: { "content-type": "application/octet-stream", "cache-control": "no-store" } });
@@ -84,17 +86,13 @@ Deno.serve(async request => {
   const signature = new TextDecoder().decode(bytes.subarray(0, 15));
   if (signature !== "SQLite format 3") return json(400, { error: "Arquivo SQLite inválido" });
   if (!leaseToken) return json(409, { error: "Gravação sem reserva distribuída" });
-  const { data: current, error: currentError } = await client.from("app_snapshots")
-    .select("version").eq("company_key", company).eq("lock_token", leaseToken)
-    .gt("lock_expires_at", new Date().toISOString()).maybeSingle();
-  if (currentError) return json(500, { error: currentError.message });
-  if (!current) return json(409, { error: "Reserva expirada ou inválida" });
-  const { error } = await client.from("app_snapshots").update({
-    database_base64: encodeBase64(bytes),
-    byte_size: bytes.length,
-    version: Number(current.version || 0) + 1,
-    updated_at: new Date().toISOString()
-  }).eq("company_key", company).eq("lock_token", leaseToken);
+  const { data: savedVersion, error } = await client.rpc("save_snapshot_with_lease", {
+    p_company_key: company,
+    p_lease_token: leaseToken,
+    p_database_base64: encodeBase64(bytes),
+    p_byte_size: bytes.length
+  });
   if (error) return json(500, { error: error.message });
-  return json(200, { saved: true, bytes: bytes.length });
+  if (!savedVersion) return json(409, { error: "Reserva expirada ou inválida" });
+  return json(200, { saved: true, bytes: bytes.length, version: savedVersion });
 });
