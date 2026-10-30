@@ -68,3 +68,9 @@ Os testes automáticos locais usam respostas controladas e não consomem APIs. P
 9. Simular erro temporário e execução interrompida; verificar que a interface orienta a revisão.
 
 Conexão da Meta, disponibilidade do número, configuração dos segredos, ativação do executor e entrega real permanecem dependentes do ambiente. Testes locais não atestam esses serviços em produção.
+
+## Pareamento local
+
+O compose local usa cache em memória e desativa a importação pesada de chats, contatos, etiquetas e histórico no Evolution para reduzir o trabalho durante o vínculo inicial. Novas mensagens continuam sendo salvas, e o histórico já registrado no CRM é mantido. A instância anterior pode ser preservada quando for necessário testar um pareamento limpo.
+
+O QR tem cor escura para leitura. Se o celular reconhecer o código e recusar o vínculo, gerar a imagem não comprova que o aparelho foi autenticado: confirme o estado `connected` e valide a troca real de mensagens. Os relatos e alternativas de configuração estão no [acompanhamento de pareamento do Evolution](https://github.com/evolution-foundation/evolution-api/issues/2437).
