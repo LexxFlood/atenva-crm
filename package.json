@@ -12,12 +12,18 @@
     "test:team": "node scripts/qa/team.cjs",
     "test:queue": "node scripts/qa/queue.cjs",
     "test:browser": "node scripts/qa/browser.cjs",
+    "test:visual": "node scripts/qa/visual.cjs",
     "automations": "node scripts/run-automations.mjs"
   },
   "engines": {
     "node": "24.x"
   },
   "dependencies": {
+    "pngjs": "^7.0.0",
+    "qrcode": "^1.5.4",
     "read-excel-file": "^6.0.1"
+  },
+  "devDependencies": {
+    "jsqr": "^1.4.0"
   }
 }

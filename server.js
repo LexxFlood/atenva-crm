@@ -16,6 +16,7 @@ import { completeGoogleAuthorization } from './src/google-calendar.js';
 import { agentModelStatus } from './src/agent.js';
 import { processPendingInboundMessages } from './src/agent.js';
 import { runWithRequestContext } from './src/request-context.js';
+import {contactAvatarImage} from './src/contact-avatar.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(root, 'public');
@@ -228,6 +229,15 @@ async function handleRequest(request, response) {
       const isWebhook = url.pathname === '/api/webhooks/whatsapp' || url.pathname === '/api/webhooks/meta-leads' || url.pathname.startsWith('/api/webhooks/evolution/');
       const isPublicInvitation = /^\/api\/invitations\/[A-Za-z0-9_-]+(?:\/accept)?$/.test(url.pathname);
       if (!isWebhook && !isPublicInvitation && !auth) return sendJson(response, 401, { error: 'Inicie sessão para continuar.' });
+      const avatarMatch=url.pathname.match(/^\/api\/contacts\/(\d+)\/avatar$/);
+      if(avatarMatch&&request.method==='GET'){
+        const contact=get('SELECT id,phone,whatsapp_id,profile_picture_url FROM contacts WHERE id=? AND company_id=?',[Number(avatarMatch[1]),auth.user.companyId]);
+        if(!contact)return sendJson(response,404,{error:'Contato não encontrado.'});
+        const image=await contactAvatarImage(contact,auth.user.companyId);
+        if(!image){response.writeHead(404,{...securityHeaders(),'Cache-Control':'private, max-age=60'});return response.end();}
+        response.writeHead(200,{...securityHeaders(image.contentType),'Cache-Control':'private, max-age=300','Content-Length':image.bytes.length});
+        return response.end(image.bytes);
+      }
       if (!isWebhook && !isPublicInvitation && unsafeMethods.has(request.method)) {
         if (!sameOrigin(request)) return sendJson(response, 403, { error: 'Origem da solicitação recusada.' });
         if (request.headers['x-csrf-token'] !== auth.csrfToken) return sendJson(response, 403, { error: 'Proteção de sessão inválida. Atualize a página.' });

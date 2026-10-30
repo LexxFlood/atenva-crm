@@ -173,6 +173,7 @@ const icons = {
 };
 
 function icon(name) {
+  if(name==='meta'||name==='whatsapp')return '<img class="meta-brand-icon" src="/assets/meta.svg" alt="" aria-hidden="true">';
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.info}</svg>`;
 }
 
@@ -257,7 +258,7 @@ async function api(path, options = {}) {
   const cachedDeal=dealMatch&&state.pipeline?.deals.find(item=>item.id===Number(dealMatch[1]));
   if(cachedDeal&&options.body&&options.body.expected_revision===undefined)options={...options,body:{...options.body,expected_revision:cachedDeal.revision}};
   const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs)||12_000);
-  const {timeoutMs,_authRetried=false,...fetchOptions}=options;
+  const {timeoutMs,_authRetried=false,_networkRetried=false,...fetchOptions}=options;
   let response;
   try{response=await fetch(path, {
     ...fetchOptions,
@@ -265,7 +266,11 @@ async function api(path, options = {}) {
     signal:controller.signal,
     headers: { 'Content-Type': 'application/json', ...(csrfToken && !['GET', 'HEAD'].includes(method) ? { 'X-CSRF-Token': csrfToken } : {}), ...(options.headers || {}) },
     body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body
-  });}catch(error){if(error.name==='AbortError'){const timeoutError=new Error('A conexão demorou demais. Tente novamente.');timeoutError.status=408;throw timeoutError;}throw error;}finally{clearTimeout(timeout);}
+  });}catch(error){
+    if(error.name==='AbortError'){const timeoutError=new Error('A conexão demorou demais. Tente novamente.');timeoutError.status=408;timeoutError.networkUnavailable=true;throw timeoutError;}
+    if(method==='GET'&&!_networkRetried&&navigator.onLine!==false){await new Promise(resolve=>setTimeout(resolve,350));return api(path,{...options,_networkRetried:true});}
+    const connectionError=new Error('Não foi possível conectar ao servidor. A tela será retomada quando a conexão voltar.');connectionError.networkUnavailable=true;throw connectionError;
+  }finally{clearTimeout(timeout);}
   const payload = await response.json().catch(() => ({}));
   if (response.status === 401 && path !== '/api/auth/login' && path !== '/api/auth/me') {
     if (!_authRetried) {
@@ -587,7 +592,37 @@ function relativeTime(date) {
 function initials(name = '') {
   return String(name || '').split(/\s+/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase() || '?';
 }
-function contactAvatar(contact, className='conversation-avatar') { return contact?.profile_picture_url ? `<span class="${className} photo"><img src="${escapeHtml(contact.profile_picture_url)}" alt="" referrerpolicy="no-referrer" onerror="this.parentElement.classList.remove('photo');this.parentElement.textContent='${initials(contact.name)}'" /></span>` : `<span class="${className}">${initials(contact?.name)}</span>`; }
+function contactAvatar(contact, className='conversation-avatar') {
+  const id=Number(contact?.contact_id||contact?.id);
+  const source=id>0?`/api/contacts/${id}/avatar`:null;
+  return `<span class="${className} contact-avatar"><span class="avatar-initials">${escapeHtml(initials(contact?.name))}</span>${source?`<img src="${source}" alt="Foto de ${escapeHtml(contact?.name||'cliente')}" loading="lazy" decoding="async" data-contact-avatar>`:''}</span>`;
+}
+document.addEventListener('error',event=>{if(event.target?.matches?.('img[data-contact-avatar]'))event.target.remove();},true);
+
+function trafficBars(trend){
+  const maximum=Math.max(1,...trend.map(item=>Math.max(item.inbound,item.outbound)));
+  const ticks=[1,.75,.5,.25,0].map(value=>`<span>${Math.round(maximum*value)}</span>`).join('');
+  return `<div class="bar-chart" aria-label="Mensagens recebidas e enviadas por dia"><div class="chart-y-axis" aria-hidden="true">${ticks}</div>${trend.map(item=>{
+    const label=new Date(`${item.day}T12:00:00`).toLocaleDateString('pt-BR',{day:'2-digit',month:'short'});
+    return `<div class="bar-group chart-hover-target" tabindex="0" data-chart-tip="${label} · ${item.inbound} recebidas · ${item.outbound} enviadas"><div class="bars"><i class="received" style="height:${Math.max(0,item.inbound)/maximum*100}%"></i><i class="sent" style="height:${Math.max(0,item.outbound)/maximum*100}%"></i></div><span>${label}</span></div>`;
+  }).join('')}</div>`;
+}
+
+let chartTooltip;
+function hideChartTooltip(){if(chartTooltip)chartTooltip.hidden=true;}
+function showChartTooltip(target,event){
+  if(!chartTooltip){chartTooltip=document.createElement('div');chartTooltip.className='chart-tooltip';chartTooltip.setAttribute('role','tooltip');document.body.append(chartTooltip);}
+  chartTooltip.textContent=target.dataset.chartTip;chartTooltip.hidden=false;
+  const bounds=target.getBoundingClientRect(),width=chartTooltip.offsetWidth,height=chartTooltip.offsetHeight;
+  const x=event.clientX??bounds.left+bounds.width/2,y=event.clientY??bounds.top;
+  chartTooltip.style.left=`${Math.max(8,Math.min(innerWidth-width-8,x-width/2))}px`;
+  chartTooltip.style.top=`${Math.max(8,y-height-12<8?Math.min(innerHeight-height-8,y+18):y-height-12)}px`;
+}
+document.addEventListener('pointerover',event=>{const target=event.target.closest?.('.bar-group[data-chart-tip]');if(target)showChartTooltip(target,event);});
+document.addEventListener('pointermove',event=>{const target=event.target.closest?.('.bar-group[data-chart-tip]');if(target)showChartTooltip(target,event);});
+document.addEventListener('pointerout',event=>{if(event.target.closest?.('.bar-group[data-chart-tip]')&&!event.relatedTarget?.closest?.('.bar-group[data-chart-tip]'))hideChartTooltip();});
+document.addEventListener('focusin',event=>{if(event.target.matches?.('.bar-group[data-chart-tip]'))showChartTooltip(event.target,{});});
+document.addEventListener('focusout',hideChartTooltip);
 function agentLabel(){ return state.agentConfig?.name || 'Atenva'; }
 
 function escapeHtml(value = '') {
@@ -648,7 +683,7 @@ async function renderOverview(liveData=null) {
       ${visibleCards.map((key, index) => metricCard(key, ...cardDefinitions[key], index === visibleCards.length - 1)).join('')}
     </div>
     <div class="chart-grid">
-      <div class="panel interactive-chart" data-chart-panel><div class="panel-header"><div><h3>Volume de conversas</h3><span>Passe o mouse em qualquer coluna para ver os valores</span></div><div class="chart-tools"><div class="chart-legend"><i class="received"></i>Recebidas <i class="sent"></i>Enviadas</div><button class="icon-button" id="toggle-traffic-chart" title="Alternar gráfico">${icon(state.trafficChart === 'bars' ? 'pie' : 'chart')}</button><button class="icon-button" id="expand-traffic-chart" title="Visualizar gráfico maior">${icon('arrow')}</button></div></div>${state.trafficChart === 'bars' ? `<div class="bar-chart">${state.dashboard.trend.map(item => { const label=new Date(`${item.day}T12:00:00`).toLocaleDateString('pt-BR',{day:'2-digit',month:'short'}); return `<div class="bar-group chart-hover-target" tabindex="0" data-chart-tip="${label} · ${item.inbound} recebidas · ${item.outbound} enviadas"><div class="bars"><i class="received" style="height:${Math.max(4, item.inbound / maxTrend * 100)}%"></i><i class="sent" style="height:${Math.max(4, item.outbound / maxTrend * 100)}%"></i></div><span>${label}</span></div>`;}).join('')}</div>` : trafficPie(state.dashboard.trend)}</div>
+      <div class="panel interactive-chart" data-chart-panel><div class="panel-header"><div><h3>Volume de conversas</h3><span>Passe o mouse em qualquer coluna para ver os valores</span></div><div class="chart-tools"><div class="chart-legend"><i class="received"></i>Recebidas <i class="sent"></i>Enviadas</div><button class="icon-button" id="toggle-traffic-chart" title="Alternar gráfico">${icon(state.trafficChart === 'bars' ? 'pie' : 'chart')}</button><button class="icon-button" id="expand-traffic-chart" title="Visualizar gráfico maior">${icon('arrow')}</button></div></div>${state.trafficChart === 'bars' ? trafficBars(state.dashboard.trend) : trafficPie(state.dashboard.trend)}</div>
       <div class="panel"><div class="panel-header"><div><h3>Funil de vendas</h3><span>Resumo das oportunidades que entraram nos funis</span></div><button class="link-button" data-view-link="pipeline">Ver funis completos →</button></div><div class="funnel visual-funnel">${stages.map(stage => `<div class="funnel-row chart-hover-target" tabindex="0" data-chart-tip="${escapeHtml(stage.name)} · ${stage.deal_count} negócio${stage.deal_count===1?'':'s'} · ${money(stage.value_cents)}"><label>${escapeHtml(stage.name)}</label><div class="funnel-track"><div class="funnel-fill" style="width:${Math.max(8, stages[0]?.deal_count ? stage.deal_count / stages[0].deal_count * 100 : 8)}%;background:${stage.color}"></div></div><b>${stage.deal_count}</b></div>`).join('')}</div></div>
     </div>
     <div class="overview-grid">
@@ -672,7 +707,7 @@ async function renderOverview(liveData=null) {
         </div>
         <div class="panel">
           <div class="panel-header"><div><h3>Atividade recente</h3><span>Decisões e alterações</span></div></div>
-          <div class="activity-list">${recentActivities.slice(0, 6).map(item => `<div class="activity-item"><span class="activity-icon">${icon(item.actor_type === 'ai' ? 'spark' : 'check')}</span><div><strong>${escapeHtml(item.contact_name || 'Sistema')}</strong><span>${escapeHtml(item.description)}</span></div><time>${relativeTime(item.created_at)}</time></div>`).join('')}</div>
+          <div class="activity-list">${recentActivities.slice(0, 6).map(item => `<div class="activity-item">${contactAvatar({id:item.contact_id,name:item.contact_name||'Contato',profile_picture_url:item.profile_picture_url},'activity-icon')}<div><strong>${escapeHtml(item.contact_name || 'Sistema')}</strong><span>${escapeHtml(item.description)}</span></div><time>${relativeTime(item.created_at)}</time></div>`).join('')}</div>
         </div>
       </div>
     </div>`;
@@ -1172,7 +1207,8 @@ function openChartPreview(title, panel) {
   if (!chart) return;
   const host = document.querySelector('#detail-modal-content');
   host.innerHTML = `<div class="modal-icon">${icon('chart')}</div><p class="overline">Visualização ampliada</p><h2>${escapeHtml(title)}</h2><div class="chart-preview-large"></div>`;
-  host.querySelector('.chart-preview-large').append(chart.cloneNode(true));
+  hideChartTooltip();
+  host.querySelector('.chart-preview-large').innerHTML=state.trafficChart==='bars'?trafficBars(state.dashboard.trend):trafficPie(state.dashboard.trend);
   bindPieTooltips(host);
   openModal('detail-modal');
 }
@@ -1543,7 +1579,7 @@ async function renderQualification() {
   const maxTotal=Math.max(1,totals.lead,totals.mql,totals.sql,totals.customer); const agentName=state.agentConfig?.name||'Atenva';
   document.querySelector('#view-qualification').innerHTML = `<div class="section-head"><div><h2>Funil de leads</h2><p>Regras sugeridas pelo playbook e editáveis pela equipe.</p></div><div class="funnel-head-actions"><div class="segmented"><button data-funnel-orientation="vertical" class="${funnelOrientation==='vertical'?'active':''}">Vertical</button><button data-funnel-orientation="horizontal" class="${funnelOrientation==='horizontal'?'active':''}">Horizontal</button></div><button class="ghost-button" id="recalculate-qualification">${icon('spark')} Recalcular contatos</button></div></div><div class="dynamic-funnel ${funnelOrientation}">${[['Impressões',totals.lead+totals.mql+totals.sql],['Leads',totals.lead],['MQLs',totals.mql],['SQLs',totals.sql],['Clientes',totals.customer]].map(([label,value],index)=>`<article style="--funnel-width:${Math.max(35,100-index*13)}%"><span class="animated-data-icon">${icon(['trend','users','spark','check','money'][index])}</span><strong>${label}</strong><b>${value}</b></article>`).join('')}</div><div class="qualification-summary"><article class="lead"><span>Lead</span><strong>${totals.lead}</strong><p>Contato capturado, ainda em descoberta.</p></article><article class="mql"><span>MQL</span><strong>${totals.mql}</strong><p>Atende aos critérios mínimos de marketing.</p></article><article class="sql"><span>SQL</span><strong>${totals.sql}</strong><p>Pronto para abordagem comercial.</p></article><article class="customer"><span>Cliente</span><strong>${totals.customer}</strong><p>Oportunidade marcada como ganha.</p></article></div><div class="qualification-layout"><section class="panel"><div class="panel-header"><div><h3>Critérios da empresa</h3><span>Sincronizados com o playbook e editáveis</span></div></div><form class="qualification-form" id="qualification-form"><div class="rule-block mql"><header><span>MQL</span><p>Lead qualificado por marketing</p></header><label>Pontuação mínima<input type="number" name="mql_min_score" min="0" max="100" value="${config.mql_min_score}" required></label><label>Ou chegou à etapa<select name="mql_stage_id"><option value="">Não usar etapa</option>${stages.map(stage => `<option value="${stage.id}" ${stage.id === config.mql_stage_id ? 'selected' : ''}>${escapeHtml(stage.name)}</option>`).join('')}</select></label></div><div class="rule-block sql"><header><span>SQL</span><p>Lead qualificado para vendas</p></header><label>Pontuação mínima<input type="number" name="sql_min_score" min="0" max="100" value="${config.sql_min_score}" required></label><label>Ou chegou à etapa<select name="sql_stage_id"><option value="">Não usar etapa</option>${stages.map(stage => `<option value="${stage.id}" ${stage.id === config.sql_stage_id ? 'selected' : ''}>${escapeHtml(stage.name)}</option>`).join('')}</select></label></div><fieldset><legend>Dados obrigatórios para qualificar</legend><div class="check-grid">${Object.entries(fieldLabels).map(([field,label]) => `<label><input type="checkbox" name="required_fields" value="${field}" ${config.required_fields.includes(field) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset><fieldset><legend>Dados adicionais obrigatórios para SQL</legend><div class="check-grid">${Object.entries(fieldLabels).map(([field,label]) => `<label><input type="checkbox" name="sql_required_fields" value="${field}" ${(config.sql_required_fields||[]).includes(field) ? 'checked' : ''}>${label}</label>`).join('')}</div></fieldset><label class="automation-toggle"><input type="checkbox" name="auto_move" ${config.auto_move ? 'checked' : ''}><span><strong>Mover cards automaticamente</strong><small>Avança etapas quando os dados exigidos estão preenchidos. A classificação é recalculada mesmo com a movimentação desligada.</small></span></label><div class="form-footer"><button class="primary-button" type="submit">Salvar regras</button></div></form></section><section class="panel kanban-map"><div class="panel-header"><div><h3>Como o Kanban influencia</h3><span>${escapeHtml(state.qualification.pipeline?.name || 'Funil de vendas')}</span></div></div><div class="qualification-flow">${stages.map(stage => { const label = stage.local_position >= (stages.find(item => item.id === config.sql_stage_id)?.local_position || 999) ? 'SQL' : stage.local_position >= (stages.find(item => item.id === config.mql_stage_id)?.local_position || 999) ? 'MQL' : 'Lead'; return `<div><i></i><strong>${escapeHtml(stage.name)}</strong><span class="qualification-badge ${label.toLowerCase()}">${label}</span></div>`; }).join('')}</div><div class="ai-explanation">${icon('spark')}<p><strong>O ${escapeHtml(agentName)} cruza três sinais:</strong> posição no Kanban, fit comercial e dados obrigatórios. O playbook pode atualizar os limites automaticamente.</p></div></section></div>`;
   const insightHost=document.querySelector('#view-qualification'); const maxLoss=Math.max(1,...state.insights.loss_reasons.map(item=>item.value));
-  insightHost.insertAdjacentHTML('beforeend',`<div class="insights-grid"><section class="panel"><div class="panel-header"><div><h3>Motivos de perda</h3><span>Estatísticas das oportunidades encerradas</span></div></div><div class="insight-bars">${state.insights.loss_reasons.map(item=>`<div><span>${escapeHtml(item.label)}</span><i><b style="width:${item.value/maxLoss*100}%"></b></i><strong>${item.value}</strong></div>`).join('')||'<p class="empty-inline">Nenhuma perda registrada.</p>'}</div></section><section class="panel"><div class="panel-header"><div><h3>Retomada x remarketing</h3><span>Tratamento dado aos não clientes</span></div></div><div class="recovery-stats">${state.insights.recovery.map(item=>`<article><strong>${item.value}</strong><span>${escapeHtml(({retomada:'Retomada comercial',remarketing:'Remarketing',arquivar:'Arquivados'})[item.label]||item.label)}</span></article>`).join('')||'<p class="empty-inline">Nenhum histórico ainda.</p>'}</div></section></div><section class="panel automation-panel"><div class="panel-header"><div><h3>Automações entre etapas e funis</h3><span>Mova negócios, crie tarefas ou aplique tags quando uma etapa for alcançada.</span></div></div><form id="pipeline-automation-form" class="automation-form"><input name="name" required placeholder="Nome da automação"><select name="trigger_stage_id" required><option value="">Quando entrar em…</option>${state.allPipelineStages.map(s=>`<option value="${s.id}">${escapeHtml(s.pipeline_name)} · ${escapeHtml(s.name)}</option>`).join('')}</select><select name="action_type"><option value="move_deal">Mover para etapa/funil</option><option value="create_task">Criar tarefa</option><option value="add_tag">Adicionar tag</option></select><select name="target_stage_id"><option value="">Etapa de destino</option>${state.allPipelineStages.map(s=>`<option value="${s.id}" data-pipeline="${s.pipeline_id}">${escapeHtml(s.pipeline_name)} · ${escapeHtml(s.name)}</option>`).join('')}</select><input name="action_value" placeholder="Título da tarefa ou tag"><button class="primary-button">Criar automação</button></form><div class="automation-list">${state.pipelineAutomations.map(item=>`<span><strong>${escapeHtml(item.name)}</strong><button data-delete-automation="${item.id}">${icon('trash')}</button></span>`).join('')||'<p class="empty-inline">Nenhuma automação personalizada.</p>'}</div></section>`);
+  insightHost.insertAdjacentHTML('beforeend',`<div class="insights-grid"><section class="panel"><div class="panel-header"><div><h3>Motivos de perda</h3><span>Estatísticas das oportunidades encerradas</span></div></div><div class="insight-bars">${state.insights.loss_reasons.map(item=>`<div><span>${escapeHtml(item.label)}</span><i><b style="width:${item.value/maxLoss*100}%"></b></i><strong>${item.value}</strong></div>`).join('')||'<p class="empty-inline">Nenhuma perda registrada.</p>'}</div></section><section class="panel"><div class="panel-header"><div><h3>Retomada x remarketing</h3><span>Tratamento dado aos não clientes</span></div></div><div class="recovery-stats">${state.insights.recovery.map(item=>`<article><strong>${item.value}</strong><span>${escapeHtml(({retomada:'Retomada comercial',remarketing:'Remarketing',arquivar:'Arquivados'})[item.label]||item.label)}</span></article>`).join('')||'<p class="empty-inline">Nenhum histórico ainda.</p>'}</div></section></div><section class="panel automation-panel"><div class="panel-header"><div><h3>Automações entre etapas e funis</h3><span>Mova negócios, crie tarefas ou aplique tags quando uma etapa for alcançada.</span></div></div><form id="pipeline-automation-form" class="automation-form"><label>Nome da automação<input name="name" required placeholder="Nome da automação"></label><label>Quando entrar em<select name="trigger_stage_id" required><option value="">Quando entrar em…</option>${state.allPipelineStages.map(s=>`<option value="${s.id}">${escapeHtml(s.pipeline_name)} · ${escapeHtml(s.name)}</option>`).join('')}</select></label><label>Ação<select name="action_type"><option value="move_deal">Mover para etapa/funil</option><option value="create_task">Criar tarefa</option><option value="add_tag">Adicionar tag</option></select></label><label>Etapa de destino<select name="target_stage_id"><option value="">Etapa de destino</option>${state.allPipelineStages.map(s=>`<option value="${s.id}" data-pipeline="${s.pipeline_id}">${escapeHtml(s.pipeline_name)} · ${escapeHtml(s.name)}</option>`).join('')}</select></label><label>Tarefa ou tag<input name="action_value" placeholder="Título da tarefa ou tag"></label><button class="primary-button">Criar automação</button></form><div class="automation-list">${state.pipelineAutomations.map(item=>`<span><strong>${escapeHtml(item.name)}</strong><button data-delete-automation="${item.id}">${icon('trash')}</button></span>`).join('')||'<p class="empty-inline">Nenhuma automação personalizada.</p>'}</div></section>`);
   document.querySelectorAll('[data-funnel-orientation]').forEach(button=>button.addEventListener('click',()=>{localStorage.setItem('atenva-funnel-orientation',button.dataset.funnelOrientation);renderQualification();}));
   document.querySelector('#qualification-form').addEventListener('submit', async event => { event.preventDefault(); const form = event.currentTarget; const values = new FormData(form); const body = Object.fromEntries(values); body.required_fields = values.getAll('required_fields'); body.sql_required_fields = values.getAll('sql_required_fields'); body.mql_stage_id = body.mql_stage_id ? Number(body.mql_stage_id) : null; body.sql_stage_id = body.sql_stage_id ? Number(body.sql_stage_id) : null; body.mql_min_score = Number(body.mql_min_score); body.sql_min_score = Number(body.sql_min_score); body.auto_move = values.has('auto_move'); try { await api('/api/qualification/config', { method: 'PUT', body }); toast('Regras atualizadas', 'Todos os contatos foram reclassificados.'); await renderQualification(); } catch (error) { toast('Não foi possível salvar', error.message, 'error'); } });
   document.querySelector('#recalculate-qualification').addEventListener('click', async () => { await api('/api/qualification/recalculate', { method: 'POST' }); toast('Qualificação atualizada', 'Lead, MQL e SQL foram recalculados.'); await renderQualification(); });
@@ -1743,7 +1779,7 @@ const titles = { overview: 'Visão geral', inbox: 'Conversas', pipeline: 'Funis'
 
 let navigationToken = 0;
 
-async function navigate(view, payload) {
+async function navigate(view, payload, reconnectAttempt=0) {
   if (!renderers[view]) return;
   const token = ++navigationToken;
   state.view = view;
@@ -1760,7 +1796,8 @@ async function navigate(view, payload) {
     if (token !== navigationToken) return;
     if (!error.sessionExpired) {
       if(target){target.innerHTML=`<div class="view-load-error">${icon('info')}<div><h3>Esta área não pôde ser aberta</h3><p>${escapeHtml(error.message)}</p><button class="primary-button" data-retry-view="${escapeHtml(view)}">Tentar novamente</button></div></div>`;document.querySelectorAll('.view').forEach(item=>item.classList.toggle('active',item===target));document.querySelectorAll('.nav-item').forEach(item=>item.classList.toggle('active',item.dataset.view===view));target.querySelector('[data-retry-view]')?.addEventListener('click',()=>navigate(view,payload));}
-      toast('Não foi possível carregar', error.message, 'error');
+      if(!reconnectAttempt)toast('Não foi possível carregar', error.message, 'error');
+      if(error.networkUnavailable)setTimeout(()=>{if(token===navigationToken&&state.user&&state.view===view)navigate(view,payload,reconnectAttempt+1);},Math.min(30000,3000*2**reconnectAttempt));
     }
   } finally {
     target?.classList.remove('is-loading');

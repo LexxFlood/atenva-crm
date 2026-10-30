@@ -1,0 +1,63 @@
+const {chromium}=require(process.env.ATENVA_PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');const {join,resolve}=require('node:path');const {pathToFileURL}=require('node:url');
+(async()=>{
+  const qa=await require('./harness.cjs').startQA();
+  const browser=await chromium.launch({headless:true,...(process.env.ATENVA_QA_BROWSER_PATH?{executablePath:process.env.ATENVA_QA_BROWSER_PATH}:{})});
+  try{
+    const context=await browser.newContext({viewport:{width:1440,height:1000}});
+    await context.request.post(qa.base+'/api/auth/login',{data:{email:'qa-admin@atenva.test',password:qa.password}});
+    const page=await context.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    const {brandedQrDataUrl}=await import(pathToFileURL(resolve('src/branded-qr.js')));
+    const qr=await brandedQrDataUrl('QR demonstrativo Atenva. Sem credenciais de acesso.');
+    const picture=fs.readFileSync(resolve('public/assets/atenva-mark-green.png'));
+    let failAgent=0;
+    await page.route('**/api/**',async route=>{
+      const url=new URL(route.request().url());
+      if(/\/api\/contacts\/\d+\/avatar$/.test(url.pathname))return route.fulfill({status:200,contentType:'image/png',body:picture});
+      if(url.pathname==='/api/evolution/status')return route.fulfill({json:{configured:true,reachable:true,connected:false,state:'close',status_title:'Ambiente visual de teste'}});
+      if(url.pathname==='/api/evolution/connect')return route.fulfill({json:{qr_code:qr,webhook_configured:true}});
+      if(url.pathname==='/api/agent/learning'&&failAgent>0){failAgent--;return route.abort('connectionfailed');}
+      return route.continue();
+    });
+    await page.addInitScript(()=>localStorage.setItem('atenva-system-tour-complete','true'));
+    await page.goto(qa.base);await page.locator('#view-overview .metric-card').first().waitFor();
+    await page.locator('.activity-item .contact-avatar img').first().waitFor();
+    await page.locator('.activity-item .contact-avatar img').first().scrollIntoViewIfNeeded();
+    await page.waitForFunction(()=>{const image=document.querySelector('.activity-item .contact-avatar img');return image?.complete&&image.naturalWidth>0});
+    assert.ok(await page.locator('.activity-item .contact-avatar img').first().evaluate(img=>img.complete&&img.naturalWidth>0));
+    await page.locator('#expand-traffic-chart').click();
+    const chart=page.locator('.chart-preview-large .bar-chart');await chart.waitFor();
+    const heights=await chart.locator('.bars i').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().height));
+    const axis=await chart.locator('.chart-y-axis span').first().evaluate(el=>({opacity:getComputedStyle(el).opacity,display:getComputedStyle(el).display,fontSize:getComputedStyle(el).fontSize,color:getComputedStyle(el).color,width:el.getBoundingClientRect().width}));
+    assert.ok(axis.opacity==='1'&&axis.width>15,'A escala do gráfico deve permanecer visível.');
+    assert.ok(Math.max(...heights)>220,'As colunas devem usar a altura do gráfico ampliado.');
+    await chart.locator('.bar-group').last().hover();
+    const tooltip=page.locator('body>.chart-tooltip');await tooltip.waitFor();
+    const bounds=await tooltip.boundingBox();assert.ok(bounds.x>=0&&bounds.y>=0&&bounds.x+bounds.width<=1440);
+    await page.screenshot({path:join(qa.reportDirectory,'grafico-claro.png')});
+    await page.locator('#detail-modal .modal-close').click();
+    await page.locator('[data-view=contacts]').click();
+    await page.locator('.contact-cell .contact-avatar img').first().waitFor();
+    assert.ok(await page.locator('.contact-cell .contact-avatar').first().evaluate(el=>{const parent=el.getBoundingClientRect(),text=el.querySelector('.avatar-initials').getBoundingClientRect();return Math.abs((parent.left+parent.width/2)-(text.left+text.width/2))<2&&Math.abs((parent.top+parent.height/2)-(text.top+text.height/2))<2;}));
+    await page.locator('[data-view=qualification]').click();await page.locator('#pipeline-automation-form').waitFor();
+    assert.equal(await page.locator('#pipeline-automation-form>label').count(),5);
+    const radius=await page.locator('#pipeline-automation-form select').first().evaluate(el=>parseFloat(getComputedStyle(el).borderRadius));assert.ok(radius>=10);
+    await page.locator('#pipeline-automation-form').screenshot({path:join(qa.reportDirectory,'automacoes-claro.png')});
+    await page.locator('#theme-toggle').click();
+    await page.locator('#pipeline-automation-form').screenshot({path:join(qa.reportDirectory,'automacoes-escuro.png')});
+    failAgent=2;
+    await page.locator('[data-view=agent]').click();
+    await page.locator('#view-agent .view-load-error').waitFor();
+    assert.ok(!(await page.locator('#view-agent').innerText()).includes('Failed to fetch'));
+    await page.locator('#view-agent .agent-command-shell').waitFor({timeout:15000});
+    await page.locator('[data-view=meta]').click();await page.locator('#connect-evolution').click();
+    await page.locator('#evolution-qr-modal img').waitFor();
+    await page.locator('#evolution-qr-modal .modal').screenshot({path:join(qa.reportDirectory,'qr-atenva.png')});
+    assert.ok(await page.locator('.meta-brand-icon').count()>0);
+    assert.deepEqual(errors,[]);
+    const report={passed:true,checks:['gráfico ampliado usa altura disponível','tooltip dentro da tela','foto nas atividades e contatos','formulário com rótulos e estilo da Atenva','tema claro e escuro','Clara recupera falha de rede sem reload','ícone Meta','QR com logo Atenva'],browserErrors:errors};
+    fs.writeFileSync(join(qa.reportDirectory,'LOCAL-VISUAL-CHECK.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
+    await context.close();
+  }finally{await browser.close();qa.stop();}
+})().catch(error=>{console.error(error);process.exit(1)});

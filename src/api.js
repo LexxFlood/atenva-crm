@@ -243,7 +243,7 @@ function dashboard(url, companyId) {
     FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id AND p.company_id=? AND p.kind='sales'
     LEFT JOIN deals d ON d.stage_id=s.id AND d.status='open' AND d.contact_id IN (SELECT id FROM contacts WHERE company_id=?)
     GROUP BY s.id ORDER BY s.local_position`, [companyId,companyId]);
-  const recentActivities = all(`SELECT a.*, ct.name AS contact_name, ct.company
+  const recentActivities = all(`SELECT a.*, ct.name AS contact_name, ct.company, ct.profile_picture_url
     FROM activities a LEFT JOIN contacts ct ON ct.id=a.contact_id
     WHERE ct.company_id=? ORDER BY a.created_at DESC LIMIT 8`, [companyId]);
   const tasks = all(`SELECT t.*, ct.name AS contact_name, ct.company, u.name AS assigned_name

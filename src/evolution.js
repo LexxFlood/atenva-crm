@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import {brandedQrDataUrl} from './branded-qr.js';
 
 function cleanBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
@@ -164,7 +165,8 @@ export async function connectEvolution(request, companyId = 1) {
   if (status.connected) return { ...status, qr_code: null };
   let connectPayload = createdPayload;
   if (!qrFrom(connectPayload)) connectPayload = await evolutionRequest(`/instance/connect/${encodeURIComponent(config.instanceName)}`, {}, companyId);
-  const qrCode = qrFrom(connectPayload);
+  const rawCode=connectPayload?.qrcode?.code||connectPayload?.qr?.code||connectPayload?.code;
+  const qrCode = typeof rawCode==='string'&&rawCode.length>40?await brandedQrDataUrl(rawCode):qrFrom(connectPayload);
   if (!qrCode) {
     throw Object.assign(new Error('A Evolution respondeu sem um QR Code válido. Tente novamente em alguns segundos.'), { statusCode: 502 });
   }
@@ -199,6 +201,12 @@ export async function disconnectEvolution(companyId = 1) {
   const { instanceName } = evolutionConfig(companyId);
   await evolutionRequest(`/instance/logout/${encodeURIComponent(instanceName)}`, { method: 'DELETE' }, companyId);
   return { disconnected: true };
+}
+
+export async function evolutionProfilePicture(number,companyId=1){
+  const {instanceName}=evolutionConfig(companyId);
+  const value=await evolutionRequest(`/chat/fetchProfilePictureUrl/${encodeURIComponent(instanceName)}`,{method:'POST',body:{number:String(number).replace(/\D/g,'')}},companyId);
+  return value?.profilePictureUrl||value?.picture||value?.url||null;
 }
 
 export async function sendEvolutionText(to, text, companyId = 1) {

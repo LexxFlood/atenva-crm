@@ -15,6 +15,7 @@ const allowedRoutes = [
   ['DELETE', /^\/instance\/logout\/[A-Za-z0-9._-]+$/],
   ['POST', /^\/message\/sendText\/[A-Za-z0-9._-]+$/],
   ['POST', /^\/message\/sendWhatsAppAudio\/[A-Za-z0-9._-]+$/]
+  ,['POST', /^\/chat\/fetchProfilePictureUrl\/[A-Za-z0-9._-]+$/]
 ];
 
 function authorized(value) {
