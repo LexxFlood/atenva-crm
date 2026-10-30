@@ -23,7 +23,7 @@ let serial=0;
 beforeEach(()=>{
   globalThis.fetch=async()=>{throw new Error('Unexpected network call in a local test');};
   process.env.NODE_ENV='test';process.env.WHATSAPP_SIMULATE='true';
-  for(const key of ['AI_API_URL','AI_API_KEY','AI_MODEL','AI_GATEWAY_API_KEY','VERCEL_OIDC_TOKEN','EVOLUTION_API_URL','EVOLUTION_API_KEY','EVOLUTION_WEBHOOK_SECRET'])delete process.env[key];
+  for(const key of ['AI_API_URL','AI_API_KEY','AI_MODEL','AI_GATEWAY_API_KEY','VERCEL_OIDC_TOKEN','EVOLUTION_API_URL','EVOLUTION_API_KEY','EVOLUTION_WEBHOOK_SECRET','EVOLUTION_WEBHOOK_BASE_URL','PUBLIC_URL'])delete process.env[key];
   run("DELETE FROM settings WHERE key LIKE 'integration:meta-whatsapp%'");
   run("UPDATE company_agent_config SET autonomy_level=2,confidence_threshold=.72,followup_rules=? WHERE company_id=1",[JSON.stringify({enabled:false,delays_hours:[24,72],max_attempts:2})]);
   run('DELETE FROM conversation_stage_rules WHERE company_id=1');
@@ -292,4 +292,19 @@ test('falhas ficam visíveis e nova tentativa exige revisão explícita e empres
   await routeApi({method:'POST'},null,url,{reviewed_delivery:true},context);
   assert.equal(get('SELECT status FROM inbound_agent_jobs WHERE message_id=?',[message.id]).status,'pending');
   // Leave this reviewed item for the next runner, without executing network calls in this test.
+});
+
+test('conexão Evolution usa endereço alcançável pelo container no webhook local',async()=>{
+  Object.assign(process.env,{EVOLUTION_API_URL:'http://127.0.0.1:8787',EVOLUTION_API_KEY:'test-evolution-key',EVOLUTION_WEBHOOK_SECRET:'test-local-secret',EVOLUTION_WEBHOOK_BASE_URL:'http://host.docker.internal:3210',PUBLIC_URL:'http://localhost:3210'});
+  const webhookUrls=[];
+  globalThis.fetch=async(url,options={})=>{
+    const body=options.body?JSON.parse(options.body):null;if(body?.webhook?.url)webhookUrls.push(body.webhook.url);
+    let payload={success:true};if(String(url).includes('fetchInstances'))payload=[];
+    else if(String(url).includes('/instance/create'))payload={qrcode:{base64:'dGVzdA=='}};
+    else if(String(url).includes('/connectionState/'))payload={instance:{state:'connecting'}};
+    return {ok:true,status:200,text:async()=>JSON.stringify(payload)};
+  };
+  const result=await routeApi({method:'POST',headers:{host:'localhost:3210'}},null,new URL('http://local/api/evolution/connect'),{},context);
+  assert.match(result.qr_code,/^data:image\/png;base64,/);assert.equal(result.webhook_configured,true);
+  assert.ok(webhookUrls.length>=1);assert.ok(webhookUrls.every(url=>url==='http://host.docker.internal:3210/api/webhooks/evolution/test-local-secret/1'));
 });

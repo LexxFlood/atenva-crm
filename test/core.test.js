@@ -521,11 +521,11 @@ test('regressão 2/4: modelo real só informa regras pertinentes e IDs aprovados
   await routeApi({method:'DELETE'},null,new URL(`http://local/api/agent/learning/${priceRule.id}`),{},context);await routeApi({method:'DELETE'},null,new URL(`http://local/api/agent/learning/${scheduleRule.id}`),{},context);
 });
 
-test('regressão 3/4: Evolution permanece compatível no backend, mas sai da interface oficial',()=>{
+test('Evolution oferece QR quando configurado e preserva o fluxo oficial Meta',()=>{
   assert.deepEqual(['unavailable','not_created','connecting','disconnected','connected'].map(state=>describeEvolutionState(state).lifecycle),['infrastructure_offline','ready_to_create','awaiting_qr','disconnected','connected']);
   const app=readFileSync(join(root,'public','app.js'),'utf8');
   const integrationView=app.slice(app.indexOf('async function renderMeta()'),app.indexOf('let facebookSdkPromise'));
-  assert.doesNotMatch(integrationView,/evolution/i);assert.match(integrationView,/WhatsApp oficial/);assert.match(integrationView,/\/api\/meta\/businesses/);
+  assert.match(integrationView,/if\(evolution\?\.configured\)/);assert.match(integrationView,/Conectar por QR Code/);assert.match(integrationView,/WhatsApp oficial/);assert.match(integrationView,/\/api\/meta\/businesses/);
 });
 
 test('regressão 4/4: OAuth Google e Meta pertence exclusivamente ao perfil que iniciou a conexão',async()=>{

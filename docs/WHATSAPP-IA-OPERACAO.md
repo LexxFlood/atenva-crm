@@ -25,6 +25,8 @@ Texto livre respeita a janela registrada a partir da mensagem recebida. Fora del
 
 Áudio usa transcrição opcional, configurada por `TRANSCRIPTION_API_URL`, `TRANSCRIPTION_API_KEY` e `TRANSCRIPTION_MODEL`. Sem configuração ou em caso de falha, a conversa vai para humano sem inventar o conteúdo. Gravação pelo navegador utiliza MP4 ou OGG quando suportado. Evolution continua disponível como integração legada, com confirmação do ID retornado pelo provedor.
 
+Para teste por QR Code, configure `EVOLUTION_API_URL`, `EVOLUTION_API_KEY`, `EVOLUTION_WEBHOOK_SECRET` e um nome de instância próprio. A tela Integrações exibe o cartão de QR somente quando essa infraestrutura está configurada. Se o CRM estiver no Windows e o Evolution no Docker Desktop, use `EVOLUTION_WEBHOOK_BASE_URL=http://host.docker.internal:3210` e permita que o serviço local seja alcançado pelo container. Esse endereço é usado apenas para o callback; `PUBLIC_URL` pode continuar como `http://localhost:3210`. O status da aplicação também acompanha a conexão Evolution, sem exigir credenciais Meta.
+
 ## Acompanhamentos com a tela fechada
 
 O servidor disponibiliza `GET /api/cron/scheduled-messages`, protegido por `Authorization: Bearer CRON_SECRET`. O executor processa mensagens agendadas, a fila de atendimento e cadências em lotes limitados. O último acionamento independente do navegador aparece em **Agente → Acompanhamentos**.

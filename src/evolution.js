@@ -54,7 +54,8 @@ function publicBaseUrl(request) {
 
 function webhookUrl(request, companyId) {
   const { webhookSecret } = evolutionConfig(companyId);
-  return `${publicBaseUrl(request)}/api/webhooks/evolution/${encodeURIComponent(webhookSecret)}/${Number(companyId) || 1}`;
+  const base=cleanBaseUrl(process.env.EVOLUTION_WEBHOOK_BASE_URL)||publicBaseUrl(request);
+  return `${base}/api/webhooks/evolution/${encodeURIComponent(webhookSecret)}/${Number(companyId) || 1}`;
 }
 
 function normalizeConnection(payload) {

@@ -202,17 +202,19 @@ async function handleRequest(request, response) {
         const official=metaIsConfigured(companyId);
         const officialReady=metaOauthStatus().configured;
         const officialState=official?'connected':'awaiting_connection';
+        const evolution=!official&&evolutionIsConfigured(companyId)?await evolutionStatus(companyId):null;
+        const whatsappConnected=official||Boolean(evolution?.connected);
         return sendJson(response, 200, {
           status: 'ok',
           demo: process.env.NODE_ENV !== 'production',
           authenticated: Boolean(auth),
-          whatsapp: official,
+          whatsapp: whatsappConnected,
           whatsappDelivery: whatsappDeliveryStatus(companyId),
-          whatsappProvider: officialReady ? 'meta_cloud_api' : null,
-          whatsappReachable: officialReady,
-          whatsappConnected: official,
-          whatsappState: officialReady ? officialState : 'not_configured',
-          whatsappLifecycle: officialReady ? officialState : 'not_configured',
+          whatsappProvider: official?'meta_cloud_api':evolution?'evolution':officialReady?'meta_cloud_api':null,
+          whatsappReachable: official||Boolean(evolution?.reachable),
+          whatsappConnected,
+          whatsappState: evolution?.state||(officialReady?officialState:'not_configured'),
+          whatsappLifecycle: evolution?.lifecycle||(officialReady?officialState:'not_configured'),
           ai: agentModelStatus().configured,
           aiModel: agentModelStatus().model,
           time: new Date().toISOString()
