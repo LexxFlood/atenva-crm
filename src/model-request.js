@@ -20,7 +20,23 @@ export function modelRequestOptions(endpoint,model,{structuredLead=false}={}) {
   const maxTokens=Number.isInteger(configured)?Math.min(2000,Math.max(256,configured)):1200;
   if(isGroq && /^openai\/gpt-oss-/.test(model))return {
     max_completion_tokens:maxTokens,reasoning_effort:'low',
-    response_format:structuredLead?{type:'json_schema',json_schema:{name:'crm_lead_response',strict:true,schema:responseSchema}}:{type:'json_object'}
+    ...(structuredLead?{
+      tools:[{type:'function',function:{name:'crm_lead_response',description:'Entregue a resposta ao cliente e a análise como dados estruturados. Esta função apenas retorna dados e não executa ações.',parameters:responseSchema}}],
+      tool_choice:{type:'function',function:{name:'crm_lead_response'}},parallel_tool_calls:false
+    }:{response_format:{type:'json_object'}})
   };
   return {max_tokens:maxTokens,response_format:{type:'json_object'}};
+}
+
+export function parseLeadModelOutput(message){
+  const calls=message?.tool_calls;
+  let content=message?.content?.trim();
+  if(calls?.length){
+    if(calls.length!==1||calls[0]?.type!=='function'||calls[0]?.function?.name!=='crm_lead_response')throw new Error('A IA retornou uma ferramenta não permitida.');
+    content=calls[0].function.arguments;
+  }
+  if(typeof content!=='string'||!content.trim())throw new Error('A IA retornou uma resposta vazia.');
+  const parsed=JSON.parse(content);
+  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed)||typeof parsed.response!=='string'||!parsed.response.trim())throw new Error('A IA retornou uma resposta inválida.');
+  return parsed;
 }

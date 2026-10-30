@@ -190,6 +190,16 @@ CREATE TABLE IF NOT EXISTS tag_definitions (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS conversation_memory (
+  conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  company_id INTEGER NOT NULL REFERENCES company_profiles(id) ON DELETE CASCADE,
+  last_message_id INTEGER,
+  customer_statements TEXT NOT NULL DEFAULT '[]',
+  last_question TEXT NOT NULL DEFAULT '',
+  last_response TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY,
   contact_id INTEGER NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,

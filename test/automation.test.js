@@ -228,7 +228,7 @@ test('negativa e pedido de agendamento não comprovam reunião confirmada',async
   modelResponse(answer([],{intent:'agendamento',stage_id:stages[2].id,stage_evidence:'Quero agendar'}));
   await processInboundMessage(f.conversationId,inbound(f,'Quero agendar uma conversa.').id);
   assert.equal(get('SELECT stage_id FROM deals WHERE id=?',[f.dealId]).stage_id,stages[0].id);
-  modelResponse(answer([],{stage_id:stages[3].id,stage_evidence:'Não quero avançar'}));
+  modelResponse({...answer([],{stage_id:stages[3].id,stage_evidence:'Não quero avançar'}),response:'Tudo bem, podemos retomar quando for adequado para você.'});
   await processInboundMessage(f.conversationId,inbound(f,'Não quero avançar agora.').id);
   assert.equal(get('SELECT stage_id FROM deals WHERE id=?',[f.dealId]).stage_id,stages[0].id);
 });
@@ -365,15 +365,50 @@ test('retomadas automáticas respeitam limite e são canceladas quando o cliente
   assert.equal(get("SELECT COUNT(*) n FROM scheduled_messages WHERE conversation_id=? AND status='scheduled'",[f.conversationId]).n,0);
 });
 
-test('requisição ao GPT OSS no Groq usa esquema estrito e limite de saída',async()=>{
+test('requisição ao GPT OSS no Groq recebe dados pela função declarada e limita saída',async()=>{
   const f=fixture();Object.assign(process.env,{AI_API_URL:'https://api.groq.com/openai/v1/chat/completions',AI_API_KEY:'test-key',AI_MODEL:'openai/gpt-oss-20b'});
   globalThis.fetch=async(url,options)=>{
     assert.equal(String(url),process.env.AI_API_URL);const body=JSON.parse(options.body);
-    assert.equal(body.response_format.type,'json_schema');assert.equal(body.response_format.json_schema.strict,true);
+    assert.equal(body.response_format,undefined);assert.equal(body.tool_choice.function.name,'crm_lead_response');
+    assert.equal(body.tools.length,1);assert.equal(body.tools[0].function.parameters.additionalProperties,false);assert.equal(body.parallel_tool_calls,false);
     assert.equal(body.max_completion_tokens,1200);assert.equal(body.max_tokens,undefined);assert.equal(body.reasoning_effort,'low');
-    return {ok:true,json:async()=>({choices:[{message:{content:JSON.stringify(answer())}}]})};
+    return {ok:true,json:async()=>({choices:[{message:{content:null,tool_calls:[{type:'function',function:{name:'crm_lead_response',arguments:JSON.stringify(answer())}}]}}]})};
   };
   const result=await processInboundMessage(f.conversationId,inbound(f,'Olá').id);assert.equal(result.status,'completed');
+});
+
+test('erro do provedor não envia a resposta repetida de transferência nem vira baixa confiança',async()=>{
+  const f=fixture();const message=inbound(f,'Bom dia');queueInboundMessage(f.conversationId,message.id);
+  Object.assign(process.env,{AI_API_URL:'https://model.invalid/v1/chat/completions',AI_API_KEY:'test-key',AI_MODEL:'test-model'});
+  globalThis.fetch=async()=>({ok:false,status:400,json:async()=>({error:{message:'Tool choice is none, but model called a tool'}})});
+  const result=await processPendingInboundMessages(1,message.id);
+  assert.equal(result.failed,1);
+  assert.equal(get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n,0);
+  assert.match(get('SELECT error FROM agent_runs WHERE trigger_message_id=?',[message.id]).error,/Falha técnica no provedor/);
+  assert.match(get('SELECT next_action FROM conversations WHERE id=?',[f.conversationId]).next_action,/Falha técnica no provedor/);
+});
+
+test('limite temporário do Groq aguarda e retoma sem transferir a conversa',async()=>{
+  const f=fixture();const message=inbound(f,'Quanto custa?');queueInboundMessage(f.conversationId,message.id);
+  Object.assign(process.env,{AI_API_URL:'https://model.invalid/v1/chat/completions',AI_API_KEY:'test-key',AI_MODEL:'test-model'});
+  globalThis.fetch=async()=>({ok:false,status:429,headers:{get:()=> '2'},json:async()=>({error:{message:'Rate limit reached. Please try again in 2s.'}})});
+  const result=await processPendingInboundMessages(1,message.id);
+  assert.equal(result.results[0].status,'retry_scheduled');
+  assert.equal(get('SELECT mode FROM conversations WHERE id=?',[f.conversationId]).mode,'autopilot');
+  assert.equal(get('SELECT status FROM inbound_agent_jobs WHERE message_id=?',[message.id]).status,'pending');
+  assert.equal(get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n,0);
+  assert.match(get('SELECT next_action FROM conversations WHERE id=?',[f.conversationId]).next_action,/limite temporário/);
+  run("UPDATE inbound_agent_jobs SET next_attempt_at=datetime('now','-1 second') WHERE message_id=?",[message.id]);
+  modelResponse(answer());await processPendingInboundMessages(1,message.id);
+  assert.equal(get('SELECT status FROM inbound_agent_jobs WHERE message_id=?',[message.id]).status,'completed');
+  assert.equal(get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n,1);
+});
+
+test('ferramenta inesperada da IA é rejeitada sem executar nem enviar seu conteúdo',async()=>{
+  const f=fixture();Object.assign(process.env,{AI_API_URL:'https://api.groq.com/openai/v1/chat/completions',AI_API_KEY:'test-key',AI_MODEL:'openai/gpt-oss-20b'});
+  globalThis.fetch=async()=>({ok:true,json:async()=>({choices:[{message:{tool_calls:[{type:'function',function:{name:'delete_customer',arguments:JSON.stringify(answer())}}]}}]})});
+  await assert.rejects(()=>processInboundMessage(f.conversationId,inbound(f,'Olá').id),/ferramenta não permitida/);
+  assert.equal(get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n,0);
 });
 
 test('falhas ficam visíveis e nova tentativa exige revisão explícita e empresa correta',async()=>{

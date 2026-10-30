@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { all, asJson, db, databasePath, ensureCompanyPipelines, get, now, run, transaction } from './db.js';
 import { agentModelStatus, companyAgentConfig, ensureCompanyAgentConfig, planAgentCommand, previewAgentResponse, processInboundMessage, processPendingInboundMessages, queueInboundMessage } from './agent.js';
 import {pauseForHumanReply} from './team-attendance.js';
+import {canonicalMessageDate} from './conversation-context.js';
 import { customerWindowIsOpen, downloadWhatsAppMedia, extractWebhookEvents, sendWhatsAppAudio, sendWhatsAppTemplate, sendWhatsAppText, whatsappDeliveryStatus } from './whatsapp.js';
 import { persistDatabaseSnapshot } from './remote-snapshot.js';
 import { validateAgentConfig } from './automation-policy.js';
@@ -282,8 +283,9 @@ function getConversation(id, companyId) {
   if (!conversation) throw Object.assign(new Error('Conversa não encontrada'), { statusCode: 404 });
   const messages = all(`SELECT m.*, u.name AS sender_name, u.avatar AS sender_avatar
     FROM messages m LEFT JOIN users u ON u.id=m.sender_id
-    WHERE m.conversation_id=? ORDER BY m.created_at, m.id`, [id]).map(message => ({
+    WHERE m.conversation_id=? ORDER BY julianday(m.created_at), m.id`, [id]).map(message => ({
       ...message,
+      created_at:canonicalMessageDate(message.created_at),
       metadata: asJson(message.metadata)
     }));
   const tags = all('SELECT tag FROM contact_tags WHERE contact_id=? ORDER BY tag', [conversation.contact_id]).map(row => row.tag);

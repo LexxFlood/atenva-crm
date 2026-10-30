@@ -8,6 +8,24 @@ const directFields = new Set(['name', 'email', 'company', 'segment', 'location']
 const commercialFields = new Set(['need', 'budget', 'timeframe', 'decision_role']);
 const normalize = value => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
 
+export function profileQuestionField(question=''){
+  const questions=String(question).match(/[^.!?\n]*\?/g)||[];
+  if(questions.length!==1)return null;
+  const text=normalize(questions[0]);
+  if(/\b(?:nome|razao social)\s+(?:da sua|de sua|da|do seu|do)\s+(?:empresa|organizacao|negocio)\b|\bqual (?:e )?(?:a )?sua empresa\b|\bcomo (?:a )?sua empresa (?:se )?chama\b/.test(text))return 'company';
+  if(/\b(?:qual (?:e )?(?:o )?seu nome|como (?:voce )?se chama|como (?:posso|devo) (?:te |lhe )?chamar)\b/.test(text))return 'name';
+  if(/\b(?:qual (?:e )?(?:o )?seu e-?mail|pode (?:me )?(?:informar|passar) (?:o )?(?:seu )?e-?mail)\b/.test(text))return 'email';
+  return null;
+}
+
+export function repeatedAnsweredQuestion(response,contact){
+  for(const question of String(response||'').match(/[^.!?\n]*\?/g)||[]){
+    const field=profileQuestionField(question);
+    if(field&&validProfileValue(field,contactProfile(contact)[field]))return field;
+  }
+  return null;
+}
+
 export function validProfileValue(field, value) {
   if (typeof value !== 'string') return false;
   const text = value.trim();
@@ -30,6 +48,12 @@ export function collectProfileUpdates(contactId, message, proposed = []) {
   if (owner?.contact_id !== contactId) return [];
   const text = String(message.content || '');
   const local = [];
+  const previous=get("SELECT content FROM messages WHERE conversation_id=? AND direction='outbound' AND id<? ORDER BY id DESC LIMIT 1",[message.conversation_id,message.id]);
+  const asked=profileQuestionField(previous?.content);
+  const answer=text.trim();
+  if(asked&&answer.length<=120&&!/[?!\n]/.test(answer)&&! /^(?:sim|nao|não|ok|certo|depois|talvez|oi|ola|olá|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|sei lá|um momento)$/i.test(answer)&&! /^(?:como|qual|por ?que|nao (?:sei|quero|vou|tenho|entendi|lembro)|não (?:sei|quero|vou|tenho|entendi|lembro)|quero falar|preciso falar|vamos continuar|pode (?:continuar|explicar)|me explica)\b/i.test(answer)&&answer.split(/\s+/).length<=12){
+    local.push({field:asked,value:answer,evidence:answer});
+  }
   const email = text.match(/[^\s<>;,]+@[^\s<>;,]+\.[a-z]{2,}/i)?.[0];
   if (email) local.push({ field: 'email', value: email, evidence: email });
   for (const [field, pattern] of [
