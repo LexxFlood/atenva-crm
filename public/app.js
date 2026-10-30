@@ -1515,13 +1515,24 @@ async function connectEvolutionFlow(event) {
     backdrop.innerHTML = `<div class="modal evolution-qr-modal"><button class="modal-close" aria-label="Fechar">${icon('x')}</button><div class="modal-icon">${icon('qr')}</div><p class="overline">Último passo</p><h2>Escaneie com o WhatsApp</h2><p>No celular, abra WhatsApp → Aparelhos conectados → Conectar aparelho e aponte a câmera para este código.</p><div class="qr-frame"><img src="${result.qr_code}" alt="QR Code para conectar o WhatsApp"></div>${result.webhook_configured === false ? '<p class="qr-warning">O QR já está disponível. A sincronização das mensagens está sendo finalizada em segundo plano.</p>' : ''}<div class="qr-wait"><i></i><span>Aguardando a leitura do QR Code…</span></div></div>`;
     backdrop.querySelector('.modal-close').addEventListener('click', () => { backdrop.hidden = true; clearInterval(evolutionPoll); });
     clearInterval(evolutionPoll);
+    const companyId=state.user?.companyId;
+    let polling=false;let qrGeneratedAt=Date.now();
     evolutionPoll = setInterval(async () => {
+      if(polling)return;
+      if(backdrop.hidden||!state.user||state.user.companyId!==companyId){clearInterval(evolutionPoll);backdrop.hidden=true;return;}
+      polling=true;
       try {
         const current = await api('/api/evolution/status');
+        if(backdrop.hidden||state.user?.companyId!==companyId)return;
         if (current.connected) { clearInterval(evolutionPoll); backdrop.hidden = true; toast('WhatsApp conectado', 'A conexão foi concluída e já está ativa.'); await loadHealth(); await renderMeta(); }
-      } catch {}
+        else if(Date.now()-qrGeneratedAt>=25_000){
+          const fresh=await api('/api/evolution/connect',{method:'POST',body:{}});
+          if(!backdrop.hidden&&state.user?.companyId===companyId&&fresh.qr_code){backdrop.querySelector('.qr-frame img').src=fresh.qr_code;qrGeneratedAt=Date.now();}
+        }
+      } catch {} finally {polling=false;}
     }, 3000);
-  } catch (error) { toast('Não foi possível conectar', error.message, 'error'); button.disabled = false; button.innerHTML = `${icon('link')} Conectar WhatsApp`; }
+  } catch (error) { toast('Não foi possível conectar', error.message, 'error'); }
+  finally {button.disabled=false;button.innerHTML='Conectar por QR Code';}
 }
 
 async function renderQualification() {

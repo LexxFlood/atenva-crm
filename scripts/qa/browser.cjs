@@ -10,12 +10,14 @@ const fs=require('node:fs');
   const page=await context.newPage();
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const fixture={id:987654,contact_id:987654,name:'Cliente QA local',phone:'5511000000000',company:'Teste',mode:'autopilot',status:'open',unread_count:1,waiting_human:0,handoff_id:null,tags:[],tasks:[],schedules:[],activities:[],score:0,qualification:'lead',messages:[],last_message:'Inicial',last_message_at:new Date().toISOString()};
-  let liveRequests=0,claims=0,failures=false,hold=null;
+  let liveRequests=0,claims=0,failures=false,hold=null,qrRequests=0;
   const pipelines=await (await context.request.get(qa.base+'/api/pipelines')).json();
   const pipelineFixture=await (await context.request.get(qa.base+`/api/pipeline?pipeline_id=${pipelines[0].id}`)).json();
   await page.route('**/api/**',async route=>{
     const req=route.request();const url=new URL(req.url());
     const json=body=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(body)});
+    if(url.pathname==='/api/evolution/status')return json({configured:true,reachable:true,connected:false,state:'close',status_title:'Conexão QA'});
+    if(url.pathname==='/api/evolution/connect'){qrRequests++;return json({qr_code:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aMs0AAAAASUVORK5CYII=',webhook_configured:true});}
     if(url.pathname==='/api/conversations/live'){
       liveRequests++;
       if(failures)return route.fulfill({status:503,contentType:'application/json',body:'{"error":"Teste offline"}'});
@@ -72,8 +74,18 @@ const fs=require('node:fs');
   await page.locator(`.deal-item[data-deal="${deal.id}"]`).waitFor();
   deal.stage_id=target.id;
   await page.locator(`.stage-column[data-stage="${target.id}"] .deal-item[data-deal="${deal.id}"]`).waitFor({timeout:10000});
+  await page.locator('[data-view=meta]').click();
+  await page.locator('#connect-evolution').click();
+  await page.locator('#evolution-qr-modal img').waitFor();
+  await page.locator('#evolution-qr-modal .modal-close').click();
+  assert.equal(await page.locator('#connect-evolution').isEnabled(),true);
+  await page.locator('#connect-evolution').click();
+  await page.locator('#evolution-qr-modal img').waitFor();
+  assert.equal(qrRequests,2);
+  await page.waitForTimeout(28500);
+  assert.ok(qrRequests>=3,'QR deve se renovar automaticamente enquanto aguarda leitura.');
   assert.deepEqual(errors,[]);
-  fs.writeFileSync(require('node:path').join(qa.reportDirectory,'LOCAL-LIVE-CHECK.json'),JSON.stringify({passed:true,checks:['mensagem sem reload','rascunho, foco e seleção preservados','busca mantida','aviso de espera humana','assumir sem reativar IA','recuperação após falha de conexão','rolagem de leitura mantida','card movido sem reload'],errors},null,2));
+  fs.writeFileSync(require('node:path').join(qa.reportDirectory,'LOCAL-LIVE-CHECK.json'),JSON.stringify({passed:true,checks:['mensagem sem reload','rascunho, foco e seleção preservados','busca mantida','aviso de espera humana','assumir sem reativar IA','recuperação após falha de conexão','rolagem de leitura mantida','card movido sem reload','QR reabre sem reload','QR renova automaticamente'],errors},null,2));
   await context.close();
   console.log('Validação no navegador passou: sincronização, rascunho, filtros, handoff e reconexão.');
   }finally{await browser.close();qa.stop();}

@@ -240,7 +240,11 @@ export function extractEvolutionWebhookEvents(payload) {
   const data = payload?.data || {};
   if (event.includes('messages.update')) {
     const updates = Array.isArray(data) ? data : [data];
-    return updates.map(item => ({ kind: 'status', externalId: item?.key?.id || item?.id, status: String(item?.update?.status || item?.status || '').toLowerCase() })).filter(item => item.externalId);
+    return updates.map(item => {
+      const status=item?.update?.status??item?.status??'';
+      const normalized=({0:'error',1:'pending',2:'server_ack',3:'delivered',4:'read',5:'played'})[status]||String(status).toLowerCase();
+      return {kind:'status',externalId:item?.key?.id||item?.id,status:normalized};
+    }).filter(item=>item.externalId);
   }
   if (!event.includes('messages.upsert')) return [];
   const entries = Array.isArray(data) ? data : [data];

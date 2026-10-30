@@ -519,7 +519,7 @@ async function processEvolutionWebhook(payload, companyId = 1,{deferProcessing=f
   const outcomes = [];
   for (const event of events) {
     if (event.kind === 'status') {
-      const statusMap = { read: 'read', played: 'read', delivered: 'delivered', delivery_ack: 'delivered', server_ack: 'sent', error: 'failed' };
+      const statusMap = { pending:'queued', read: 'read', played: 'read', delivered: 'delivered', delivery_ack: 'delivered', server_ack: 'sent', error: 'failed' };
       const mapped = statusMap[event.status] || 'sent';
       run('UPDATE messages SET status=? WHERE whatsapp_message_id=?', [mapped, event.externalId]);
       updateCampaignDelivery(event.externalId, mapped);

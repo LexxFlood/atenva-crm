@@ -5,6 +5,7 @@ O servidor persistente atende as consultas enquanto a IA aguarda um provedor ext
 ## Comportamento da equipe
 
 - Conversas e confirmações de entrega são consultadas a cada 2 segundos enquanto a aba está visível. Rascunho, foco, seleção, busca e rolagem do histórico são preservados.
+- O QR Code pode ser fechado e reaberto sem recarregar a página e é renovado automaticamente enquanto aguarda leitura.
 - Cards do funil são sincronizados automaticamente. Dashboard, contatos e tarefas internas são consultados periodicamente. Diálogos abertos, digitação e arraste suspendem a repintura dessas telas até a interação terminar.
 - O pedido de transferência da IA aparece como **Aguardando atendimento humano**, no filtro **Aguardando equipe**, no sino e em um aviso na tela. Abrir a conversa não equivale a assumir.
 - Assumir reserva a conversa para um atendente. Um segundo atendente recebe conflito, em vez de assumir silenciosamente. Uma resposta de outro atendente também é recusada enquanto o primeiro mantém o atendimento humano.

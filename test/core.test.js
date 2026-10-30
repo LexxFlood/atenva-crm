@@ -105,6 +105,9 @@ test('normaliza mensagens e confirmações recebidas da Evolution', () => {
   const statuses = extractEvolutionWebhookEvents({ event: 'messages.update', data: { key: { id: 'EVO-123' }, update: { status: 'delivered' } } });
   assert.equal(statuses[0].kind, 'status');
   assert.equal(statuses[0].status, 'delivered');
+  for(const [code,status] of [[0,'error'],[1,'pending'],[2,'server_ack'],[3,'delivered'],[4,'read'],[5,'played']]){
+    assert.equal(extractEvolutionWebhookEvents({event:'messages.update',data:{key:{id:'NUMERIC'},update:{status:code}}})[0].status,status);
+  }
 });
 
 test('ignora grupos e mensagens enviadas pelo próprio número na Evolution', () => {
