@@ -98,6 +98,9 @@ test('normaliza mensagens e confirmações recebidas da Evolution', () => {
   assert.equal(messages[0].contactName, 'Daniel');
   assert.equal(messages[0].content, 'Olá pela Evolution');
   assert.equal(messages[0].externalId, 'EVO-123');
+  assert.equal(messages[0].type,'text');
+  const wrapped=extractEvolutionWebhookEvents({event:'messages.upsert',data:{key:{id:'EVO-WRAPPED',remoteJid:'5511987654321@s.whatsapp.net'},message:{messageContextInfo:{},ephemeralMessage:{message:{extendedTextMessage:{text:'Texto com contexto'}}}}}});
+  assert.equal(wrapped[0].type,'text');assert.equal(wrapped[0].content,'Texto com contexto');
 
   const statuses = extractEvolutionWebhookEvents({ event: 'messages.update', data: { key: { id: 'EVO-123' }, update: { status: 'delivered' } } });
   assert.equal(statuses[0].kind, 'status');

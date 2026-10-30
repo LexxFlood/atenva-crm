@@ -41,8 +41,17 @@ const state = {
     : localStorage.getItem('atenva-sidebar-preference-v2') === 'true'
 };
 let scheduledMessageHeartbeat = null;
+let liveHeartbeat = null;
+let liveInFlight = false;
+let liveRetryAt = 0;
+let liveFailures = 0;
+let liveSignature = '';
+let liveViewRefreshAt = 0;
+const notifiedHandoffs = new Set();
 
 function resetCompanyScopedState() {
+  liveSignature = '';
+  notifiedHandoffs.clear();
   state.dashboard = null;
   state.dashboardPreferences = null;
   state.dashboardRange = null;
@@ -244,6 +253,9 @@ async function refreshSession() {
 
 async function api(path, options = {}) {
   const method = options.method || 'GET';
+  const dealMatch=method==='PATCH'&&path.match(/^\/api\/deals\/(\d+)$/);
+  const cachedDeal=dealMatch&&state.pipeline?.deals.find(item=>item.id===Number(dealMatch[1]));
+  if(cachedDeal&&options.body&&options.body.expected_revision===undefined)options={...options,body:{...options.body,expected_revision:cachedDeal.revision}};
   const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),Number(options.timeoutMs)||12_000);
   const {timeoutMs,_authRetried=false,...fetchOptions}=options;
   let response;
@@ -270,12 +282,15 @@ async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(payload.error || `Erro ${response.status}`);
     error.status = response.status;
+    error.retryAfterMs=Number(response.headers.get('Retry-After')||0)*1000;
     throw error;
   }
+  if(cachedDeal&&payload.revision!==undefined)Object.assign(cachedDeal,payload);
   return payload;
 }
 
 function showLogin(message = '') {
+  clearInterval(liveHeartbeat);liveHeartbeat=null;
   clearInterval(scheduledMessageHeartbeat);scheduledMessageHeartbeat=null;
   state.user = null;
   csrfToken = '';
@@ -315,6 +330,130 @@ function showApp(user) {
   const processScheduledMessages=()=>api('/api/scheduled-messages/process',{method:'POST',body:{}}).catch(()=>{});
   processScheduledMessages();
   scheduledMessageHeartbeat=setInterval(processScheduledMessages,60_000);
+  clearInterval(liveHeartbeat);
+  liveHeartbeat=setInterval(refreshLiveData,2000);
+}
+
+// Read-only synchronization: never runs the model or sends WhatsApp messages.
+async function refreshLiveData() {
+  if(liveInFlight||!state.user||document.hidden||Date.now()<liveRetryAt||state.inboxLoading)return;
+  const revision=`${state.user.companyId}:${navigationToken}:${state.inboxRequestId}`;
+  const current=()=>state.user&&revision===`${state.user.companyId}:${navigationToken}:${state.inboxRequestId}`;
+  const selectedId=state.view==='inbox'?state.selectedConversation?.id:null;
+  liveInFlight=true;
+  try {
+    const payload=await api(`/api/conversations/live${selectedId?`?selected=${selectedId}&version=${encodeURIComponent(state.liveSelectedVersion||'')}`:''}`);
+    if(!current())return;
+    liveFailures=0;liveRetryAt=0;
+    const signature=JSON.stringify(payload.conversations);
+    const changed=signature!==liveSignature;
+    liveSignature=signature;
+    state.conversations=payload.conversations;
+    state.conversationsLoadedAt=Date.now();
+    const unread=document.querySelector('#nav-unread');if(unread)unread.textContent=payload.conversations.filter(item=>item.unread_count>0).length;
+    for(const item of payload.conversations.filter(item=>item.waiting_human)){
+      const key=`${item.id}:${item.handoff_id}`;
+      if(!notifiedHandoffs.has(key)){
+        notifiedHandoffs.add(key);
+        toast('Atendimento humano necessário',`${item.name} está aguardando ser atendido pela equipe.`);
+      }
+    }
+    if(state.view==='inbox'){
+      refreshConversationRows();
+      if(selectedId){
+        state.liveSelectedVersion=payload.selected_version||'';
+        if(payload.selected&&Number(payload.selected.id)===Number(state.selectedConversation?.id))applyLiveConversation(payload.selected);
+        else if(state.selectedConversation)applyLiveConversation(state.selectedConversation);
+      }
+    }
+    if(changed)refreshNotifications(!document.querySelector('#notification-panel').hidden);
+    // Refresh the visible board without interrupting typing, dialogs or a drag.
+    const canRefreshView=()=>!document.querySelector('.modal-backdrop:not([hidden]), .dragging, .is-dragging')&&!document.activeElement?.matches('input,textarea,select');
+    if(state.view==='pipeline'&&canRefreshView()){
+      const pipelineId=state.selectedPipelineId;
+      if(pipelineId){
+        const data=await api(`/api/pipeline?pipeline_id=${pipelineId}`);
+        if(current()&&canRefreshView()&&pipelineId===state.selectedPipelineId&&JSON.stringify(data)!==JSON.stringify(state.pipeline)){
+          const board=document.querySelector('.pipeline-board');const left=board?.scrollLeft||0;
+          await renderPipeline(data);
+          const updated=document.querySelector('.pipeline-board');if(updated)updated.scrollLeft=left;
+        }
+      }
+    }
+    if(Date.now()>=liveViewRefreshAt&&canRefreshView()){
+      liveViewRefreshAt=Date.now()+5000;
+      const view=state.view;
+      if(view==='overview'){
+        const data=await api(`/api/dashboard?${new URLSearchParams(state.dashboardRange||{})}`);
+        if(current()&&canRefreshView()&&JSON.stringify(data)!==JSON.stringify(state.dashboard))await renderOverview(data);
+      }else if(view==='contacts'){
+        const data=await Promise.all([api('/api/contacts'),api('/api/organizations')]);
+        if(current()&&canRefreshView()&&JSON.stringify(data)!==JSON.stringify([state.contacts,state.organizations])){
+          const fields=[...document.querySelectorAll('#view-contacts input:not([type=checkbox]),#view-contacts select')].map(field=>({id:field.id,value:field.value}));
+          await renderContacts(data);
+          for(const {id,value} of fields){const field=id&&document.getElementById(id);if(field){field.value=value;field.dispatchEvent(new Event(field.tagName==='SELECT'?'change':'input',{bubbles:true}));}}
+        }
+      }else if(view==='tasks'){
+        const query=new URLSearchParams(state.taskRange||{});if(state.taskOwnerFilter)query.set('assigned_to',state.taskOwnerFilter);
+        const internal=await api(`/api/tasks?${query}`);
+        const data=[...internal,...state.tasks.filter(task=>task.source==='google')];
+        if(current()&&canRefreshView()&&JSON.stringify(data)!==JSON.stringify(state.tasks))await renderTasks(data);
+      }
+    }
+  } catch(error) {
+    if(current()){liveFailures++;liveRetryAt=Date.now()+Math.max(error.retryAfterMs||0,Math.min(30000,2000*2**liveFailures));}
+  } finally {liveInFlight=false;}
+}
+
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){liveRetryAt=0;refreshLiveData();}});
+window.addEventListener('online',()=>{liveRetryAt=0;refreshLiveData();});
+
+function refreshConversationRows(){
+  const host=document.querySelector('#conversation-list');if(!host)return;
+  const query=(document.querySelector('#conversation-search')?.value||'').toLowerCase();
+  const filter=document.querySelector('[data-filter].active')?.dataset.filter||'all';
+  const items=state.conversations.filter(c=>(filter!=='unread'||c.unread_count)&&(filter!=='human'||c.mode==='human')&&(filter!=='waiting'||c.waiting_human)&&`${c.name} ${c.company} ${c.last_message}`.toLowerCase().includes(query));
+  const markup=conversationRows(items,state.selectedConversation?.id);
+  if(host.innerHTML!==markup){const top=host.scrollTop;host.innerHTML=markup;host.scrollTop=top;}
+  document.querySelector('.conversation-tools-heading div>span').textContent=`${state.conversations.length} contatos`;
+}
+
+function applyLiveConversation(conversation){
+  const previous=state.selectedConversation;
+  state.selectedConversation=conversation;
+  const scroll=document.querySelector('#message-scroll');
+  if(!scroll)return;
+  const atBottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<80;
+  const oldTop=scroll.scrollTop;
+  const previousMessages=new Map(previous.messages.map(message=>[message.id,JSON.stringify(message)]));
+  let messagesChanged=false;
+  let anchor=scroll.querySelector('.date-divider');
+  for(const message of conversation.messages){
+    let node=scroll.querySelector(`[data-message-id="${Number(message.id)}"]`);
+    if(!node||previousMessages.get(message.id)!==JSON.stringify(message)){
+      const template=document.createElement('template');template.innerHTML=renderMessage(message,conversation);const updated=template.content.firstElementChild;
+      if(node)node.replaceWith(updated);node=updated;messagesChanged=true;
+    }
+    if(anchor?.nextElementSibling!==node){anchor.after(node);messagesChanged=true;}
+    anchor=node;
+  }
+  const ids=new Set(conversation.messages.map(message=>String(message.id)));
+  scroll.querySelectorAll('[data-message-id]').forEach(node=>{if(!ids.has(node.dataset.messageId)){node.remove();messagesChanged=true;}});
+  if(messagesChanged)scroll.scrollTop=atBottom?scroll.scrollHeight:oldTop;
+  const status=document.querySelector('.chat-header-copy span');
+  const pauseSeconds=conversation.human_pause_until?Math.max(0,Math.ceil((new Date(conversation.human_pause_until)-Date.now())/1000)):0;
+  if(status)status.textContent=conversation.waiting_human?'Aguardando atendimento humano':pauseSeconds?`Atendimento humano · IA retoma em ${pauseSeconds}s`:conversation.mode==='human'?'Atendimento humano':conversation.mode==='copilot'?'IA em modo copiloto':`${agentLabel()} está atendendo`;
+  const modeButton=document.querySelector('#toggle-mode');
+  if(modeButton)modeButton.innerHTML=conversation.waiting_human?`${icon('users')} Assumir atendimento`:conversation.mode==='human'?`${icon('spark')} Devolver para o ${escapeHtml(agentLabel())}`:`${icon('users')} Assumir conversa`;
+  const banner=document.querySelector('.mode-banner');
+  if(banner)banner.innerHTML=`${icon(conversation.mode==='human'?'users':'spark')} ${conversation.waiting_human?'Cliente aguardando atendimento da equipe':conversation.mode==='human'?'Você assumiu esta conversa':'Ao responder, a conversa passa para atendimento humano'}`;
+  const name=document.querySelector('.chat-header-copy strong');if(name)name.textContent=conversation.name;
+  const summary=document.querySelector('.ai-summary');
+  if(summary){summary.querySelector('p').textContent=conversation.summary||'Ainda não há informações suficientes.';summary.querySelectorAll('p')[1].textContent=conversation.next_action||'Aguardar nova mensagem.';}
+  if(JSON.stringify([previous.score,previous.stage_id,previous.qualification,previous.value_cents])!==JSON.stringify([conversation.score,conversation.stage_id,conversation.qualification,conversation.value_cents])){
+    const template=document.createElement('template');template.innerHTML=renderContactDetail(conversation);
+    const deal=document.querySelector('#contact-detail .deal-card');if(deal)deal.replaceWith(template.content.querySelector('.deal-card'));
+  }
 }
 
 function notificationItem({ iconName='info', title, text, view, conversationId='', tone='' }) {
@@ -325,6 +464,7 @@ async function refreshNotifications(renderPanel = true) {
   const badge = document.querySelector('#notification-badge');
   const list = document.querySelector('#notification-list');
   if (!state.user || !badge || !list) return;
+  const companyId=state.user.companyId;
   if (renderPanel) list.innerHTML = '<p class="notification-loading">Carregando notificações…</p>';
   try {
     const [dashboard, health, google] = await Promise.all([
@@ -332,8 +472,11 @@ async function refreshNotifications(renderPanel = true) {
       api('/api/health').catch(() => ({ whatsappReachable:false, whatsappConnected:false, whatsappState:'unavailable' })),
       api('/api/integrations/google/status').catch(() => ({ configured:false, connected:false }))
     ]);
+    if(!state.user||state.user.companyId!==companyId)return;
     const items = [];
-    const unread = dashboard.conversations.filter(item => Number(item.unread_count) > 0);
+    const conversations=state.conversations.length?state.conversations:dashboard.conversations;
+    conversations.filter(item=>item.waiting_human).forEach(item=>items.push({iconName:'users',title:item.name,text:'Está aguardando atendimento humano. Clique para abrir a conversa e assumir.',view:'inbox',conversationId:item.id,tone:'urgent'}));
+    const unread = conversations.filter(item => Number(item.unread_count) > 0);
     unread.slice(0, 4).forEach(item => items.push({ iconName:'message', title:item.name, text:`${item.unread_count} mensagem${Number(item.unread_count)===1?'':'s'} não lida${Number(item.unread_count)===1?'':'s'} · ${item.last_message || 'Nova conversa'}`, view:'inbox', conversationId:item.id }));
     const hiddenUnread = Math.max(0, Number(dashboard.metrics.unread_conversations || 0) - unread.length);
     if (hiddenUnread) items.push({ iconName:'message', title:`Mais ${hiddenUnread} conversa${hiddenUnread===1?'':'s'} não lida${hiddenUnread===1?'':'s'}`, text:'Abra a caixa de entrada para revisar.', view:'inbox' });
@@ -474,14 +617,15 @@ async function loadHealth() {
   } catch { const label = document.querySelector('#connection-label'); if (label) label.textContent = 'Servidor indisponível'; }
 }
 
-async function renderOverview() {
-  setLoading('#view-overview');
+async function renderOverview(liveData=null) {
+  if(!liveData)setLoading('#view-overview');
   if (!state.dashboardRange) {
     const end = new Date(); const start = new Date(); start.setDate(start.getDate() - 29);
     state.dashboardRange = { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
   }
   const query = new URLSearchParams(state.dashboardRange);
-  [state.dashboard, state.dashboardPreferences] = await Promise.all([api(`/api/dashboard?${query}`), api('/api/dashboard/preferences')]);
+  if(liveData)state.dashboard=liveData;
+  else [state.dashboard, state.dashboardPreferences] = await Promise.all([api(`/api/dashboard?${query}`), api('/api/dashboard/preferences')]);
   const { metrics, stages, recentActivities, tasks, conversations } = state.dashboard;
   document.querySelector('#nav-unread').textContent = metrics.unread_conversations;
   const cardDefinitions = {
@@ -627,6 +771,8 @@ function paintInbox(selectedId = null, options = {}) {
   const selected = Number(state.selectedConversation?.id) === Number(selectedId) ? state.selectedConversation : null;
   const host = document.querySelector('#view-inbox');
   if (!host) return;
+  const search=host.querySelector('#conversation-search')?.value||'';
+  const filter=host.querySelector('[data-filter].active')?.dataset.filter||'all';
   host.innerHTML = `
     <div class="inbox-layout ${selectedId ? 'chat-open' : 'list-open'} ${listLoading ? 'inbox-loading' : ''}">
       <aside class="conversation-column">
@@ -636,11 +782,18 @@ function paintInbox(selectedId = null, options = {}) {
       ${selected ? renderChat(selected) : detailLoading ? '<section class="chat-column chat-loading"><div class="chat-loading-header"><i></i><span><b></b><small></small></span></div><div class="chat-loading-body"><span></span><span></span><span></span></div></section>' : '<div class="empty-state inbox-empty"><h3>Selecione uma conversa</h3><p>Escolha um contato para abrir o atendimento.</p></div>'}
       ${selected ? renderContactDetail(selected) : ''}
     </div>`;
+  host.querySelector('.inbox-filters').insertAdjacentHTML('beforeend','<button class="filter-chip" data-filter="waiting">Aguardando equipe</button>');
   bindInbox();
+  host.querySelector('#conversation-search').value=search;
+  host.querySelectorAll('[data-filter]').forEach(button=>button.classList.toggle('active',button.dataset.filter===filter));
+  if(!listLoading)refreshConversationRows();
 }
 
 async function renderInbox(preselectedId) {
   const requestId = ++state.inboxRequestId;
+  state.liveSelectedVersion='';
+  state.inboxLoading=true;
+  try {
   const mobile = window.matchMedia('(max-width: 820px)').matches;
   const listIsFresh = state.conversations.length && Date.now() - state.conversationsLoadedAt < 30000;
   let selectedId = preselectedId || (!mobile ? state.selectedConversation?.id || state.conversations[0]?.id : null);
@@ -673,12 +826,13 @@ async function renderInbox(preselectedId) {
     paintInbox(null);
     toast('Não foi possível abrir a conversa', error.message, 'error');
   }
+  } finally {if(requestId===state.inboxRequestId)state.inboxLoading=false;}
 }
 
 function conversationRows(items, selectedId) {
   return items.map(c => `<button class="conversation-row ${c.id === selectedId ? 'active' : ''}" data-conversation="${c.id}">
     ${contactAvatar(c)}
-    <span><strong>${escapeHtml(c.name)}</strong><p>${c.last_sender === 'ai' ? `${escapeHtml(agentLabel())}: ` : ''}${escapeHtml(c.last_message || '')}</p></span>
+    <span><strong>${escapeHtml(c.name)}</strong>${c.waiting_human?'<small class="handoff-waiting">Aguardando atendimento humano</small>':''}<p>${c.last_sender === 'ai' ? `${escapeHtml(agentLabel())}: ` : ''}${escapeHtml(c.last_message || '')}</p></span>
     <span class="conversation-meta"><time>${relativeTime(c.last_message_at)}</time>${c.unread_count ? `<b class="unread">${c.unread_count}</b>` : ''}</span>
   </button>`).join('');
 }
@@ -694,7 +848,7 @@ function renderChat(c) {
 function renderMessage(message, conversation) {
   const outbound = message.direction === 'outbound';
   const ai = message.sender_type === 'ai';
-  return `<div class="message ${outbound ? 'outbound' : ''} ${ai ? 'ai' : ''}">
+  return `<div data-message-id="${Number(message.id)}" class="message ${outbound ? 'outbound' : ''} ${ai ? 'ai' : ''}">
     ${outbound ? `<span class="avatar ${ai ? '' : 'avatar-dark'}">${ai ? 'IA' : message.sender_avatar || 'AM'}</span>` : `<span class="avatar">${initials(conversation.name)}</span>`}
     <div class="message-bubble">${ai ? `<span class="ai-label">${icon('spark')} Resposta autónoma</span>` : ''}${message.type === 'audio' ? `<span class="audio-message">${icon('mic')} Áudio ${message.metadata?.transcribed?'transcrito pela IA':''}</span>${message.metadata?.audio_data?`<audio controls preload="metadata" src="${message.metadata.audio_data}"></audio>`:''}` : ''}<p>${escapeHtml(message.content)}</p>${ai?`<button type="button" class="ai-correction-button" data-correct-ai="${message.id}">${icon('settings')} Ajustar aprendizado</button>`:''}<div class="message-info"><time>${new Date(message.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</time>${outbound ? `<span class="message-status" aria-label="${message.metadata?.simulated?'Simulação':escapeHtml(message.status)}">${message.metadata?.simulated?'Simulação':({queued:'Na fila',sent:'Enviada ✓',delivered:'Entregue ✓✓',read:'Lida ✓✓',failed:'Falha no envio'})[message.status]||escapeHtml(message.status)}</span>` : ''}</div></div>
   </div>`;
@@ -712,8 +866,9 @@ function renderContactDetail(c) {
 }
 
 function bindInbox() {
-  document.querySelectorAll('[data-conversation]').forEach(button => button.addEventListener('click', () => renderInbox(Number(button.dataset.conversation))));
+  document.querySelector('#conversation-list')?.addEventListener('click',event=>{const button=event.target.closest('[data-conversation]');if(button)renderInbox(Number(button.dataset.conversation));});
   const scroll = document.querySelector('#message-scroll'); if (scroll) scroll.scrollTop = scroll.scrollHeight;
+  if(state.selectedConversation)applyLiveConversation(state.selectedConversation);
   document.querySelector('#message-form')?.addEventListener('submit', sendMessage);
   document.querySelector('#record-audio')?.addEventListener('click', toggleAudioRecording);
   document.querySelector('#message-form textarea')?.addEventListener('keydown', event => {
@@ -731,21 +886,15 @@ function bindInbox() {
   document.querySelector('#detail-close')?.addEventListener('click', () => document.querySelector('#contact-detail')?.classList.remove('open'));
   document.querySelector('#chat-new-task')?.addEventListener('click', () => openTaskModal(state.selectedConversation));
   document.querySelectorAll('[data-cancel-schedule]').forEach(button=>button.addEventListener('click',async()=>{if(!confirm('Cancelar este follow-up agendado?'))return;await api(`/api/scheduled-messages/${button.dataset.cancelSchedule}`,{method:'DELETE'});toast('Agendamento cancelado','A mensagem não será enviada.');await renderInbox(state.selectedConversation.id);}));
-  document.querySelectorAll('[data-correct-ai]').forEach(button=>button.addEventListener('click',()=>openAiCorrection(Number(button.dataset.correctAi))));
+  scroll?.addEventListener('click',event=>{const button=event.target.closest('[data-correct-ai]');if(button)openAiCorrection(Number(button.dataset.correctAi));});
   document.querySelector('#refresh-summary')?.addEventListener('click', async () => { await api(`/api/conversations/${state.selectedConversation.id}/summary`, { method: 'POST' }); toast('Resumo atualizado', `${agentLabel()} consolidou o progresso mais recente.`); await renderInbox(state.selectedConversation.id); });
   document.querySelector('#contact-tag-form')?.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); await api(`/api/contacts/${state.selectedConversation.contact_id}/tags`, { method: 'POST', body: data }); toast('Tag adicionada', 'O contato foi atualizado.'); await renderInbox(state.selectedConversation.id); });
   document.querySelector('#conversation-search')?.addEventListener('input', event => {
-    const query = event.target.value.toLowerCase();
-    const filtered = state.conversations.filter(c => `${c.name} ${c.company} ${c.last_message}`.toLowerCase().includes(query));
-    document.querySelector('#conversation-list').innerHTML = conversationRows(filtered, state.selectedConversation?.id);
-    document.querySelectorAll('[data-conversation]').forEach(button => button.addEventListener('click', () => renderInbox(Number(button.dataset.conversation))));
+    refreshConversationRows();
   });
   document.querySelectorAll('[data-filter]').forEach(button => button.addEventListener('click', () => {
     document.querySelectorAll('[data-filter]').forEach(item => item.classList.remove('active')); button.classList.add('active');
-    const filter = button.dataset.filter;
-    const items = filter === 'unread' ? state.conversations.filter(c => c.unread_count) : filter === 'human' ? state.conversations.filter(c => c.mode === 'human') : state.conversations;
-    document.querySelector('#conversation-list').innerHTML = conversationRows(items, state.selectedConversation?.id);
-    document.querySelectorAll('[data-conversation]').forEach(item => item.addEventListener('click', () => renderInbox(Number(item.dataset.conversation))));
+    refreshConversationRows();
   }));
 }
 
@@ -796,18 +945,18 @@ async function sendMessage(event) {
 }
 
 async function toggleConversationMode() {
-  const next = state.selectedConversation.mode === 'human' ? 'autopilot' : 'human';
+  const next = state.selectedConversation.mode === 'human' && !state.selectedConversation.waiting_human ? 'autopilot' : 'human';
   await api(`/api/conversations/${state.selectedConversation.id}`, { method: 'PATCH', body: { mode: next } });
   state.conversations = [];
   await renderInbox(state.selectedConversation.id);
-  toast(next === 'human' ? 'Conversa assumida' : 'Piloto automático ativado', next === 'human' ? `${agentLabel()} agora funciona apenas como copiloto.` : `${agentLabel()} voltará a responder novas mensagens.`);
+  toast(next === 'human' ? 'Conversa assumida' : 'Piloto automático ativado', next === 'human' ? `${agentLabel()} pausou as respostas automáticas nesta conversa.` : `${agentLabel()} voltará a responder novas mensagens.`);
 }
 
-async function renderPipeline() {
-  setLoading('#view-pipeline');
+async function renderPipeline(liveData=null) {
+  if(!liveData)setLoading('#view-pipeline');
   if (!state.pipelines.length || !state.users.length) [state.pipelines, state.users] = await Promise.all([api('/api/pipelines'), api('/api/users')]);
   state.selectedPipelineId ||= state.pipelines[0]?.id;
-  state.pipeline = await api(`/api/pipeline?pipeline_id=${state.selectedPipelineId}`);
+  state.pipeline = liveData||await api(`/api/pipeline?pipeline_id=${state.selectedPipelineId}`);
   document.querySelector('#view-pipeline').innerHTML = `<div class="section-head"><div class="funnel-title-area"><h2>Funis</h2><p>Arraste oportunidades entre etapas ou até a bandeja inferior para excluir, perder ou ganhar.</p><div class="funnel-switcher"><button type="button" id="funnel-switcher" aria-expanded="false" aria-haspopup="listbox"><span><small>Funil atual</small><strong>${escapeHtml(state.pipeline.pipeline.name)}</strong></span>${icon('arrow')}</button><div class="funnel-switcher-menu" id="funnel-switcher-menu" role="listbox" hidden>${state.pipelines.map(item => `<button type="button" role="option" data-funnel-id="${item.id}" aria-selected="${item.id === state.selectedPipelineId}"><span>${icon('pipeline')}</span><span><strong>${escapeHtml(item.name)}</strong><small>${item.id === state.selectedPipelineId ? 'Em exibição' : 'Abrir este funil'}</small></span>${item.id === state.selectedPipelineId ? icon('check') : ''}</button>`).join('')}</div></div></div><div class="pipeline-actions"><button class="ghost-button" id="new-deal">${icon('plus')} Novo negócio</button><button class="ghost-button" id="edit-pipeline">${icon('sliders')} Editar funil</button><button class="primary-button" id="new-pipeline">${icon('plus')} Novo funil</button></div></div><div class="pipeline-stats"><span><b>${state.pipeline.deals.filter(item => item.status === 'open').length}</b> em andamento</span><span class="won"><b>${state.pipeline.closed?.won||0}</b> ganhos</span><span class="lost"><b>${state.pipeline.closed?.lost||0}</b> perdidos</span></div><div class="pipeline-board" style="grid-template-columns:repeat(${Math.max(3, state.pipeline.stages.length)},minmax(230px,1fr))">${state.pipeline.stages.map((stage, index) => renderStage(stage, state.pipeline.deals.filter(deal => deal.stage_id === stage.id), index === 0)).join('')}</div><div class="pipeline-drop-actions" id="pipeline-drop-actions"><div class="delete" data-deal-drop="delete">${icon('trash')}<strong>Excluir</strong><small>Apagar negócio</small></div><div class="lost" data-deal-drop="lost">${icon('x')}<strong>Perda</strong><small>Registrar motivo</small></div><div class="won" data-deal-drop="won">${icon('check')}<strong>Ganho</strong><small>Enviar para clientes</small></div></div>`;
   const switcher=document.querySelector('#funnel-switcher'),menu=document.querySelector('#funnel-switcher-menu');
   switcher.addEventListener('click',event=>{event.stopPropagation();const open=menu.hidden;menu.hidden=!open;switcher.setAttribute('aria-expanded',String(open));});
@@ -938,8 +1087,8 @@ function openDealEditor(deal){
   host.querySelector('#deal-edit-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const button=form.querySelector('[type=submit]');const values=Object.fromEntries(new FormData(form));button.disabled=true;button.textContent='Salvando…';try{await api(`/api/deals/${deal.id}`,{method:'PATCH',body:{title:values.title,stage_id:Number(values.stage_id),value_cents:Math.round(Number(values.value||0)*100),score:Number(values.score||0),expected_close_at:values.expected_close_at||null,contact:{name:values.contact_name,company:values.company,phone:values.phone,email:values.email,source:values.source,segment:values.segment,notes:values.sdr_notes}}});closeModals();toast('Lead atualizado','As alterações já aparecem no funil.');await renderPipeline();}catch(error){toast('Não foi possível editar',error.message,'error');button.disabled=false;button.textContent='Salvar alterações';}});
 }
 
-async function renderContacts() {
-  setLoading('#view-contacts'); [state.contacts,state.organizations] = await Promise.all([api('/api/contacts'),api('/api/organizations')]); state.contactView ||= 'people';
+async function renderContacts(liveData=null) {
+  if(!liveData)setLoading('#view-contacts'); [state.contacts,state.organizations] = liveData||await Promise.all([api('/api/contacts'),api('/api/organizations')]); state.contactView ||= 'people';
   if(state.contactView==='companies'){
     document.querySelector('#view-contacts').innerHTML=`<div class="section-head"><div><h2>Empresas</h2><p>Cada empresa pode reunir vários contatos e oportunidades.</p></div><div class="section-actions"><div class="view-switch"><button data-contact-view="people">Pessoas</button><button class="active" data-contact-view="companies">Empresas</button></div><button class="primary-button" id="new-organization">${icon('plus')} Nova empresa</button></div></div><div class="organization-grid">${state.organizations.map(org=>`<article class="panel organization-card"><span class="mini-avatar">${initials(org.name)}</span><div><h3>${escapeHtml(org.name)}</h3><p>${org.contact_count} contato(s) · ${money(org.pipeline_value)} em aberto</p>${org.segment?`<span class="stage-badge">${escapeHtml(org.segment)}</span>`:''}</div></article>`).join('')||'<div class="empty-state"><h3>Nenhuma empresa</h3><p>Crie a primeira empresa e vincule seus contatos.</p></div>'}</div>`;
     document.querySelectorAll('[data-contact-view]').forEach(button=>button.addEventListener('click',()=>{state.contactView=button.dataset.contactView;renderContacts();}));
@@ -1049,14 +1198,14 @@ async function openTaskModal(conversation = null, task = null, deal = null) {
   openModal('task-modal');
 }
 
-async function renderTasks() {
-  setLoading('#view-tasks');
+async function renderTasks(liveData=null) {
+  if(!liveData)setLoading('#view-tasks');
   if (!state.users.length) state.users = await api('/api/users');
   if(!state.taskRange){const start=new Date();start.setDate(start.getDate()-30);const end=new Date();end.setDate(end.getDate()+30);state.taskRange={start:start.toISOString().slice(0,10),end:end.toISOString().slice(0,10)};}
   const taskQuery=new URLSearchParams({start:state.taskRange.start,end:state.taskRange.end});if(state.taskOwnerFilter)taskQuery.set('assigned_to',state.taskOwnerFilter);
-  state.tasks = await api(`/api/tasks?${taskQuery}`);
+  state.tasks = liveData||await api(`/api/tasks?${taskQuery}`);
   const calendarStart=state.taskRange.start,calendarEnd=state.taskRange.end;
-  try{const google=await api('/api/integrations/google/status');state.googleCalendar=google;if(google.connected){const events=await api(`/api/integrations/google/events?start=${calendarStart}&end=${calendarEnd}`);const existing=new Set(state.tasks.filter(task=>task.google_event_id).map(task=>`${task.google_calendar_id||'primary'}:${task.google_event_id}`));state.tasks=[...state.tasks,...events.filter(event=>!existing.has(`${event.google_calendar_id||'primary'}:${event.google_event_id}`))];}}catch(error){state.googleCalendar={...(state.googleCalendar||{}),sync_error:error.message};}
+  if(!liveData)try{const google=await api('/api/integrations/google/status');state.googleCalendar=google;if(google.connected){const events=await api(`/api/integrations/google/events?start=${calendarStart}&end=${calendarEnd}`);const existing=new Set(state.tasks.filter(task=>task.google_event_id).map(task=>`${task.google_calendar_id||'primary'}:${task.google_event_id}`));state.tasks=[...state.tasks,...events.filter(event=>!existing.has(`${event.google_calendar_id||'primary'}:${event.google_event_id}`))];}}catch(error){state.googleCalendar={...(state.googleCalendar||{}),sync_error:error.message};}
   const internalTaskIds=new Set(state.tasks.filter(task=>task.source!=='google').map(task=>String(task.id)));state.selectedTasks=new Set([...state.selectedTasks].filter(id=>internalTaskIds.has(String(id))));
   const pending = state.tasks.filter(task => task.status === 'pending');
   const grouped = pending.reduce((groups, task) => { const day = task.due_at ? new Date(task.due_at).toLocaleDateString('en-CA') : 'Sem data'; (groups[day] ||= []).push(task); return groups; }, {});

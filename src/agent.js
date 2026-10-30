@@ -6,6 +6,7 @@ import { qualificationConfig, recalculateContactQualification } from './qualific
 import { collectProfileUpdates, contactProfile, missingProfileFields, profileLabels, profileScore } from './lead-profile.js';
 import { currentVercelOidcToken } from './request-context.js';
 import { modelRequestOptions } from './model-request.js';
+import {resumeExpiredHumanPauses,requestHumanAttendance} from './team-attendance.js';
 import { runStageAutomations } from './pipeline-automation.js';
 
 const HANDOFF_PATTERNS = {
@@ -227,7 +228,7 @@ function scheduleFollowup(conversation, contact) {
 
 function handoff(conversation, contact, runId, reason) {
   run(`UPDATE conversations SET mode = 'human', priority = ?, next_action = ?, updated_at = ? WHERE id = ?`,
-    [reason === 'reclamacao' ? 'urgent' : 'high', `Atendimento humano necessário: ${reason.replaceAll('_', ' ')}.`, now(), conversation.id]);
+    [reason === 'reclamacao' ? 'urgent' : 'high', `Aguardando atendimento humano: ${reason.replaceAll('_', ' ')}.`, now(), conversation.id]);
   logTool(runId, 'transferir_para_humano', { reason }, { assigned_to: conversation.assigned_to, status: 'transferred' });
   run(`INSERT INTO activities (contact_id, conversation_id, actor_type, action, description)
     VALUES (?, ?, 'ai', 'human_handoff', ?)`, [contact.id, conversation.id, `Conversa transferida: ${reason.replaceAll('_', ' ')}.`]);
@@ -450,6 +451,7 @@ export async function processInboundMessage(conversationId, triggerMessageId) {
   }
 
   let [intent, confidence] = classifyIntent(trigger.content);
+  const initialDeal=get('SELECT id,revision FROM deals WHERE contact_id=? ORDER BY id DESC LIMIT 1',[contact.id]);
   const runResult = run(`INSERT INTO agent_runs
     (conversation_id, trigger_message_id, status, intent, confidence, reasoning_summary)
     VALUES (?, ?, 'running', ?, ?, ?)`,
@@ -486,6 +488,15 @@ export async function processInboundMessage(conversationId, triggerMessageId) {
         logTool(runId, 'gerar_resposta_ia', {}, { error: modelError.message }, 'failed');
       }
       const analysis=generation?.analysis;
+      const currentConversation=get('SELECT mode,status,human_pause_until FROM conversations WHERE id=?',[conversationId]);
+      if(currentConversation.mode==='human'||currentConversation.status==='closed'){
+        run("UPDATE agent_runs SET status='completed',completed_at=? WHERE id=?",[now(),runId]);
+        return {runId,status:'superseded_by_human'};
+      }
+      if(get("SELECT id FROM messages WHERE conversation_id=? AND direction='inbound' AND id>? LIMIT 1",[conversationId,trigger.id])){
+        run("UPDATE agent_runs SET status='completed',completed_at=? WHERE id=?",[now(),runId]);
+        return {runId,status:'superseded_by_new_message'};
+      }
       const allowedIntents=new Set(['saudacao','produto','preco','agendamento','duvida_geral','pedido_humano','reclamacao','desconto']);
       if(analysis && allowedIntents.has(analysis.intent) && typeof analysis.confidence==='number' && analysis.confidence>=0 && analysis.confidence<=1){intent=analysis.intent;confidence=analysis.confidence;}
       const modelHandoff=['pedido_humano','reclamacao','desconto','baixa_confianca'].includes(analysis?.handoff_reason)?analysis.handoff_reason:HANDOFF_PATTERNS[intent]?intent:null;
@@ -498,9 +509,10 @@ export async function processInboundMessage(conversationId, triggerMessageId) {
         if(changes.length)logTool(runId,'coletar_dados_cliente',{message_id:trigger.id},{changes});
         contact=get('SELECT * FROM contacts WHERE id=?',[contact.id]);
         const deal=ensureDeal(contact.id,conversation.assigned_to,intent);
+        const preserveHumanMove=initialDeal&&(deal.id!==initialDeal.id||deal.revision!==initialDeal.revision);
         const score=updateLeadScore(deal.id,contact);deal.score=score.score;
         logTool(runId,'pontuar_lead',{contact_id:contact.id},{score:score.score,source:'validated_profile'});
-        const automated=automateDealStage(deal,intent,contact.id,trigger.content,analysis);
+        const automated=preserveHumanMove?deal:automateDealStage(deal,intent,contact.id,trigger.content,analysis);
         if(automated.stage_id!==deal.stage_id){
           logTool(runId,'atualizar_etapa_automaticamente',{intent},{stage:automated.stage_name});
           runStageAutomations(deal.id,automated.stage_id,contact.company_id);
@@ -533,6 +545,11 @@ export async function processInboundMessage(conversationId, triggerMessageId) {
       return { runId, messageId: Number(suggestion.lastInsertRowid), response: responseText, intent, confidence, status: 'suggested' };
     }
 
+    const beforeSend=get('SELECT mode,status,human_pause_until FROM conversations WHERE id=?',[conversationId]);
+    if(beforeSend.status==='closed'||beforeSend.human_pause_until||(beforeSend.mode==='human'&&runStatus!=='handoff')){
+      run("UPDATE agent_runs SET status='completed',completed_at=? WHERE id=?",[now(),runId]);
+      return {runId,status:'superseded_by_human'};
+    }
     const outbound = await sendWhatsAppText(contact.whatsapp_id || contact.phone.replace(/\D/g, ''), responseText, contact.company_id || 1);
     const messageResult = run(`INSERT INTO messages
       (conversation_id, whatsapp_message_id, direction, sender_type, type, content, status, metadata)
@@ -549,7 +566,7 @@ export async function processInboundMessage(conversationId, triggerMessageId) {
   } catch (error) {
     run(`UPDATE agent_runs SET status = 'failed', error = ?, duration_ms = ?, completed_at = ? WHERE id = ?`,
       [error.message, Date.now() - started, now(), runId]);
-    if(!error.retryable)run(`UPDATE conversations SET mode = 'human', priority = 'high', next_action = 'Agente falhou; conferir o envio antes de continuar.', updated_at = ? WHERE id = ?`, [now(), conversationId]);
+    if(!error.retryable)requestHumanAttendance(conversationId,'Agente falhou; conferir o envio antes de continuar.');
     throw error;
   }
 }
@@ -558,7 +575,15 @@ export function queueInboundMessage(conversationId,messageId) {
   run('INSERT OR IGNORE INTO inbound_agent_jobs(message_id,conversation_id) VALUES (?,?)',[messageId,conversationId]);
 }
 
+let activeQueueDrains=0;
 export async function processPendingInboundMessages(companyId=null,onlyMessageId=null,deadline=Date.now()+90_000) {
+  if(activeQueueDrains>=3)return {processed:0,failed:0,results:[],busy:true};
+  activeQueueDrains++;
+  try{
+  resumeExpiredHumanPauses();
+  const interrupted=all(`SELECT DISTINCT j.conversation_id FROM inbound_agent_jobs j JOIN conversations c ON c.id=j.conversation_id JOIN contacts ct ON ct.id=c.contact_id
+    WHERE j.status='processing' AND datetime(j.claimed_at)<datetime('now','-10 minutes') AND (? IS NULL OR ct.company_id=?)`,[companyId,companyId]);
+  for(const item of interrupted)requestHumanAttendance(item.conversation_id,'Execução interrompida; confira o envio antes de continuar.');
   // A crashed worker may have sent a message. Do not silently send it again.
   run(`UPDATE conversations SET mode='human',priority='high',next_action='Execução interrompida; confira o envio antes de continuar.'
     WHERE id IN (SELECT j.conversation_id FROM inbound_agent_jobs j JOIN conversations c ON c.id=j.conversation_id JOIN contacts ct ON ct.id=c.contact_id
@@ -572,23 +597,31 @@ export async function processPendingInboundMessages(companyId=null,onlyMessageId
   const results=[];
   for(const job of jobs){
     if(Date.now()+45_000>deadline)break;
-    const claim=run("UPDATE inbound_agent_jobs SET status='processing',attempts=attempts+1,claimed_at=?,updated_at=? WHERE message_id=? AND status='pending'",[now(),now(),job.message_id]);
+    const conversation=get('SELECT mode,human_pause_until FROM conversations WHERE id=?',[job.conversation_id]);
+    if(conversation?.human_pause_until&&new Date(conversation.human_pause_until)>new Date()){
+      run("UPDATE inbound_agent_jobs SET next_attempt_at=? WHERE message_id=? AND status='pending'",[conversation.human_pause_until,job.message_id]);continue;
+    }
+    const claim=run(`UPDATE inbound_agent_jobs SET status='processing',attempts=attempts+1,claimed_at=?,updated_at=? WHERE message_id=? AND status='pending' AND attempts=? AND datetime(next_attempt_at)<=datetime('now')
+      AND NOT EXISTS(SELECT 1 FROM inbound_agent_jobs active WHERE active.conversation_id=inbound_agent_jobs.conversation_id AND active.status='processing')`,[now(),now(),job.message_id,job.attempts]);
     if(!claim.changes)continue;
     try{
       await persistDatabaseSnapshot(databasePath,db);
-      const result=await processInboundMessage(job.conversation_id,job.message_id);
+      const newerHuman=get("SELECT id FROM messages WHERE conversation_id=? AND sender_type='human' AND direction='outbound' AND id>? LIMIT 1",[job.conversation_id,job.message_id]);
+      const newerPending=get("SELECT message_id FROM inbound_agent_jobs WHERE conversation_id=? AND status='pending' AND message_id>? ORDER BY message_id DESC LIMIT 1",[job.conversation_id,job.message_id]);
+      const result=newerHuman||newerPending?{status:'superseded'}:await processInboundMessage(job.conversation_id,job.message_id);
       run("UPDATE inbound_agent_jobs SET status='completed',error=NULL,updated_at=? WHERE message_id=?",[now(),job.message_id]);
       results.push({message_id:job.message_id,status:'completed',agent:result});
     }catch(error){
       const retry=error.retryable===true && job.attempts+1<3;
       run('UPDATE inbound_agent_jobs SET status=?,next_attempt_at=?,error=?,updated_at=? WHERE message_id=?',
         [retry?'pending':'failed',new Date(Date.now()+60_000*2**job.attempts).toISOString(),String(error.message).slice(0,500),now(),job.message_id]);
-      if(!retry)run("UPDATE conversations SET mode='human',priority='high',next_action='Falha na automação; revisar o histórico de envio.',updated_at=? WHERE id=?",[now(),job.conversation_id]);
+      if(!retry)requestHumanAttendance(job.conversation_id,'Falha na automação; revisar o histórico de envio.');
       results.push({message_id:job.message_id,status:retry?'retry_scheduled':'failed',error:error.message});
     }
     await persistDatabaseSnapshot(databasePath,db);
   }
   return {processed:results.length,failed:results.filter(item=>item.status==='failed').length,results};
+  }finally{activeQueueDrains--;}
 }
 
 export { classifyIntent, searchKnowledge };

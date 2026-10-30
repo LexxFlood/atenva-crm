@@ -9,6 +9,7 @@ data/*.db-wal
 .gcloud-config/
 .vercel/
 node_modules/
+reports/qa/
 
 .whatsapp-verify.tmp
 deploy/evolution/tunnel-logs/

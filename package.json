@@ -9,6 +9,9 @@
     "dev": "node --watch server.js",
     "seed": "node src/seed.js",
     "test": "node --test",
+    "test:team": "node scripts/qa/team.cjs",
+    "test:queue": "node scripts/qa/queue.cjs",
+    "test:browser": "node scripts/qa/browser.cjs",
     "automations": "node scripts/run-automations.mjs"
   },
   "engines": {

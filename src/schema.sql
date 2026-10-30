@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   summary TEXT,
   next_action TEXT,
   customer_window_until TEXT,
+  human_pause_until TEXT,
   unread_count INTEGER NOT NULL DEFAULT 0,
   last_message_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,

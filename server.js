@@ -14,6 +14,7 @@ import { persistDatabaseSnapshot, withSynchronizedDatabase } from './src/remote-
 import { evolutionConfig, evolutionIsConfigured, evolutionStatus } from './src/evolution.js';
 import { completeGoogleAuthorization } from './src/google-calendar.js';
 import { agentModelStatus } from './src/agent.js';
+import { processPendingInboundMessages } from './src/agent.js';
 import { runWithRequestContext } from './src/request-context.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -118,7 +119,9 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   const ip = clientIp(request);
   try {
-    if (!allowRate(`global:${ip}`, 240, 60_000)) return sendJson(response, 429, { error: 'Muitas solicitações. Aguarde um minuto.' }, { 'Retry-After': '60' });
+    const rateAuth=url.pathname.startsWith('/api/')?authenticate(request):null;
+    const rateKey=rateAuth?.user?`user:${rateAuth.user.id}`:`anonymous:${ip}`;
+    if (!allowRate(rateKey, rateAuth?.user?600:240, 60_000)) return sendJson(response, 429, { error: 'Muitas solicitações. Aguarde um minuto.' }, { 'Retry-After': '60' });
 
     if (request.method === 'GET' && url.pathname === '/api/webhooks/whatsapp') {
       const query = Object.fromEntries(url.searchParams);
@@ -153,7 +156,8 @@ async function handleRequest(request, response) {
       }
 
       if (url.pathname === '/api/auth/login' && request.method === 'POST') {
-        if (!allowRate(`login:${ip}`, 8, 15 * 60_000)) return sendJson(response, 429, { error: 'Muitas tentativas. Tente novamente em 15 minutos.' }, { 'Retry-After': '900' });
+        const loginIdentity=String(body.email||'').trim().toLowerCase().slice(0,254);
+        if (!allowRate(`login:${ip}:${loginIdentity}`, 8, 15 * 60_000)||!allowRate(`login-network:${ip}`,60,15*60_000)) return sendJson(response, 429, { error: 'Muitas tentativas. Tente novamente em 15 minutos.' }, { 'Retry-After': '900' });
         const result = login({ email: body.email, password: body.password, companySlug: body.company_slug, ip, userAgent: request.headers['user-agent'] });
         if (!result || result.locked || result.tenantDenied) {
           const status = result?.locked ? 423 : result?.tenantDenied ? 403 : 401;
@@ -275,7 +279,24 @@ server.listen(port, host, () => {
   console.log(`IA externa: ${agentModelStatus().configured ? agentModelStatus().model : 'motor local de contingência'}`);
 });
 
+// Persistent hosts acknowledge webhooks after enqueueing, then drain the durable
+// queue separately. Three slots keep a slow model from stopping other clients.
+let activeQueueWorkers=0;
+let queueTimer=null;
+if(!process.env.VERCEL){
+  queueTimer=setInterval(()=>{
+    while(activeQueueWorkers<3){
+      activeQueueWorkers++;
+      withSynchronizedDatabase({write:true,reload:reloadDatabaseFromSnapshot},()=>processPendingInboundMessages())
+        .catch(error=>console.error('[fila de atendimento]',error.message))
+        .finally(()=>{activeQueueWorkers--;});
+    }
+  },1000);
+  queueTimer.unref();
+}
+
 function shutdown() {
+  clearInterval(queueTimer);
   server.close(() => process.exit(0));
 }
 process.on('SIGINT', shutdown);

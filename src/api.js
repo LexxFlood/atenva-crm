@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { all, asJson, db, databasePath, ensureCompanyPipelines, get, now, run, transaction } from './db.js';
 import { agentModelStatus, companyAgentConfig, ensureCompanyAgentConfig, planAgentCommand, previewAgentResponse, processInboundMessage, processPendingInboundMessages, queueInboundMessage } from './agent.js';
+import {pauseForHumanReply} from './team-attendance.js';
 import { customerWindowIsOpen, downloadWhatsAppMedia, extractWebhookEvents, sendWhatsAppAudio, sendWhatsAppTemplate, sendWhatsAppText, whatsappDeliveryStatus } from './whatsapp.js';
 import { persistDatabaseSnapshot } from './remote-snapshot.js';
 import { validateAgentConfig } from './automation-policy.js';
@@ -194,7 +195,11 @@ function dateRange(url) {
 function conversationList(companyId) {
   return all(`SELECT
       c.id, c.status, c.mode, c.priority, c.intent, c.sentiment, c.summary, c.next_action,
-      c.customer_window_until, c.unread_count, c.last_message_at,
+      c.customer_window_until, c.human_pause_until, c.unread_count, c.last_message_at,
+      CASE WHEN c.mode='human' AND c.status!='closed' AND
+        (SELECT a.action FROM activities a WHERE a.conversation_id=c.id AND a.action IN ('human_handoff','human_takeover','human_reply') ORDER BY a.id DESC LIMIT 1)='human_handoff'
+        THEN 1 ELSE 0 END AS waiting_human,
+      (SELECT a.id FROM activities a WHERE a.conversation_id=c.id AND a.action='human_handoff' ORDER BY a.id DESC LIMIT 1) AS handoff_id,
       ct.id AS contact_id, ct.name, ct.phone, ct.email, ct.company, ct.segment, ct.location, ct.qualification, ct.profile_picture_url,
       u.name AS assigned_name, u.avatar AS assigned_avatar,
       d.id AS deal_id, d.title AS deal_title, d.value_cents, d.score, d.status AS deal_status, d.lost_reason,
@@ -289,6 +294,19 @@ function getConversation(id, companyId) {
     JOIN contacts ct ON ct.id=c.contact_id WHERE sm.conversation_id=? AND ct.company_id=? ORDER BY sm.send_at,sm.id`, [id,companyId])
     .map(item=>({...item,payload:asJson(item.payload,{})}));
   return { ...conversation, messages, tags, activities, tasks, schedules };
+}
+
+function recordHumanReply(conversation,userId){
+  pauseForHumanReply(conversation.id,userId);
+  run("INSERT INTO activities(contact_id,conversation_id,actor_type,actor_id,action,description) VALUES (?,?,'human',?,'human_reply','Equipe respondeu ao cliente.')",[conversation.contact_id,conversation.id,userId]);
+}
+
+function beginHumanReply(conversation,userId){
+  const current=get('SELECT mode,assigned_to FROM conversations WHERE id=?',[conversation.id]);
+  const action=get("SELECT action FROM activities WHERE conversation_id=? AND action IN ('human_handoff','human_takeover','human_reply') ORDER BY id DESC LIMIT 1",[conversation.id]);
+  if(current.mode==='human'&&current.assigned_to&&current.assigned_to!==userId&&['human_takeover','human_reply'].includes(action?.action))throw Object.assign(new Error('Esta conversa está sendo atendida por outra pessoa da equipe.'),{statusCode:409});
+  run("UPDATE conversations SET mode='human',assigned_to=?,human_pause_until=NULL,next_action='Equipe preparando uma resposta; IA pausada.',updated_at=? WHERE id=?",[userId,now(),conversation.id]);
+  run("INSERT INTO activities(contact_id,conversation_id,actor_type,actor_id,action,description) VALUES (?,?,'human',?,'human_takeover','Atendente iniciou uma resposta.')",[conversation.contact_id,conversation.id,userId]);
 }
 
 export async function processScheduledMessages(companyId = null) {
@@ -396,7 +414,7 @@ function createInbound({ phone, name, content, whatsappId, externalId, timestamp
   return { conversation, contact, messageId: Number(result.lastInsertRowid), duplicate: false };
 }
 
-async function processWebhook(payload) {
+async function processWebhook(payload,{deferProcessing=false}={}) {
   const events = extractWebhookEvents(payload);
   const outcomes = [];
   for (const event of events) {
@@ -427,7 +445,7 @@ async function processWebhook(payload) {
     });
     if (!incoming.duplicate) {
       queueInboundMessage(incoming.conversation.id,incoming.messageId);
-      const result = await processPendingInboundMessages(companyId,incoming.messageId);
+      const result = deferProcessing?{queued:true}:await processPendingInboundMessages(companyId,incoming.messageId);
       outcomes.push({ kind: 'message', conversationId: incoming.conversation.id, agent: result });
     }
   }
@@ -496,7 +514,7 @@ async function processMetaLeadWebhook(payload) {
   return outcomes;
 }
 
-async function processEvolutionWebhook(payload, companyId = 1) {
+async function processEvolutionWebhook(payload, companyId = 1,{deferProcessing=false}={}) {
   const events = extractEvolutionWebhookEvents(payload);
   const outcomes = [];
   for (const event of events) {
@@ -524,7 +542,7 @@ async function processEvolutionWebhook(payload, companyId = 1) {
     });
     if (!incoming.duplicate) {
       queueInboundMessage(incoming.conversation.id,incoming.messageId);
-      const result = await processPendingInboundMessages(companyId,incoming.messageId);
+      const result = deferProcessing?{queued:true}:await processPendingInboundMessages(companyId,incoming.messageId);
       outcomes.push({ kind: 'message', conversationId: incoming.conversation.id, agent: result });
     }
   }
@@ -606,6 +624,13 @@ export async function routeApi(request, response, url, body, context) {
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, [`dashboard:${context.user.id}`, JSON.stringify({ cards }), now()]);
     return { cards };
   }
+  if (method === 'GET' && path === '/api/conversations/live') {
+    const conversations=conversationList(context.user.companyId);
+    const selectedId=Number(url.searchParams.get('selected'));
+    const selected=conversations.some(item=>item.id===selectedId)?getConversation(selectedId,context.user.companyId):null;
+    const selected_version=selected?createHash('sha256').update(JSON.stringify(selected)).digest('base64url'):null;
+    return {conversations,selected:selected_version&&selected_version===url.searchParams.get('version')?null:selected,selected_version};
+  }
   if (method === 'GET' && path === '/api/conversations') { await processScheduledMessages(context.user.companyId); return conversationList(context.user.companyId); }
   if (method === 'POST' && path === '/api/scheduled-messages/process') return processScheduledMessages(context.user.companyId);
 
@@ -613,13 +638,21 @@ export async function routeApi(request, response, url, body, context) {
   if (method === 'GET' && match) return getConversation(parseId(match[1]), context.user.companyId);
   if (method === 'PATCH' && match) {
     const id = parseId(match[1]);
+    getConversation(id,context.user.companyId);
+    if(body.mode==='human'){
+      const latest=get('SELECT mode,assigned_to FROM conversations WHERE id=?',[id]);
+      const lastAction=get("SELECT action FROM activities WHERE conversation_id=? AND action IN ('human_handoff','human_takeover','human_reply') ORDER BY id DESC LIMIT 1",[id]);
+      if(latest.mode==='human'&&['human_takeover','human_reply'].includes(lastAction?.action)&&latest.assigned_to&&latest.assigned_to!==context.user.id)throw Object.assign(new Error('Outro atendente já assumiu esta conversa. Atualize o contexto antes de transferir.'),{statusCode:409});
+    }
     const allowed = ['status', 'mode', 'priority', 'assigned_to', 'next_action'];
     const entries = Object.entries(body || {}).filter(([key]) => allowed.includes(key));
     if (!entries.length) throw Object.assign(new Error('Nenhum campo permitido foi informado'), { statusCode: 400 });
     const sets = entries.map(([key]) => `${key}=?`).join(', ');
     run(`UPDATE conversations SET ${sets}, updated_at=? WHERE id=?`, [...entries.map(([, value]) => value), now(), id]);
+    if(['autopilot','copilot'].includes(body.mode))run('UPDATE conversations SET human_pause_until=NULL WHERE id=?',[id]);
     if (body.mode === 'human') {
       const item = getConversation(id, context.user.companyId);
+      run('UPDATE conversations SET assigned_to=?,human_pause_until=NULL,next_action=? WHERE id=?',[context.user.id,'Atendimento humano em andamento.',id]);
       run(`INSERT INTO activities (contact_id, conversation_id, actor_type, action, description)
         VALUES (?, ?, 'human', 'human_takeover', 'Atendimento assumido por uma pessoa.')`, [item.contact_id, id]);
     }
@@ -672,6 +705,7 @@ export async function routeApi(request, response, url, body, context) {
     const id = parseId(match[1]);
     const conversation = getConversation(id, context.user.companyId);
     if (!body?.content?.trim()) throw Object.assign(new Error('A mensagem não pode estar vazia'), { statusCode: 400 });
+    beginHumanReply(conversation,context.user.id);
     const signedContent = appendHumanSignature(context.user.companyId, context.user.id, body.content);
     const sendResult = await sendWhatsAppText(conversation.phone.replace(/\D/g, ''), signedContent, context.user.companyId);
     const result = run(`INSERT INTO messages
@@ -679,14 +713,15 @@ export async function routeApi(request, response, url, body, context) {
       VALUES (?, ?, 'outbound', 'human', ?, ?, ?, ?)`,
     [id, sendResult.id, context.user.id, signedContent, sendResult.status, JSON.stringify({ simulated: sendResult.simulated })]);
     run(`UPDATE conversations SET mode='human', unread_count=0, last_message_at=?, updated_at=? WHERE id=?`, [now(), now(), id]);
+    recordHumanReply(conversation,context.user.id);
     return { id: Number(result.lastInsertRowid), ...sendResult };
   }
 
   match = path.match(/^\/api\/conversations\/(\d+)\/audio$/);
   if (method === 'POST' && match) {
     const id=parseId(match[1]); const conversation=getConversation(id, context.user.companyId); const encoded=String(body?.data_base64||''); if(!encoded||encoded.length>2_600_000)throw Object.assign(new Error('O áudio deve ter no máximo 1,8 MB.'),{statusCode:400});
-    const transcript=await transcribeAudio(encoded,String(body?.mime_type||'audio/webm')); const sendResult=await sendWhatsAppAudio(conversation.phone.replace(/\D/g,''),encoded,context.user.companyId,String(body?.mime_type||'audio/ogg'));
-    const result=run(`INSERT INTO messages (conversation_id,whatsapp_message_id,direction,sender_type,sender_id,type,content,status,metadata) VALUES (?,?,'outbound','human',?,'audio',?,?,?)`,[id,sendResult.id,context.user.id,transcript,sendResult.status,JSON.stringify({transcribed:true,mime_type:body?.mime_type,simulated:sendResult.simulated,audio_data:`data:${body?.mime_type||'audio/webm'};base64,${encoded}`})]); run(`UPDATE conversations SET mode='human',unread_count=0,last_message_at=?,updated_at=? WHERE id=?`,[now(),now(),id]); return {id:Number(result.lastInsertRowid),transcript,...sendResult};
+    beginHumanReply(conversation,context.user.id); const transcript=await transcribeAudio(encoded,String(body?.mime_type||'audio/webm')); const sendResult=await sendWhatsAppAudio(conversation.phone.replace(/\D/g,''),encoded,context.user.companyId,String(body?.mime_type||'audio/ogg'));
+    const result=run(`INSERT INTO messages (conversation_id,whatsapp_message_id,direction,sender_type,sender_id,type,content,status,metadata) VALUES (?,?,'outbound','human',?,'audio',?,?,?)`,[id,sendResult.id,context.user.id,transcript,sendResult.status,JSON.stringify({transcribed:true,mime_type:body?.mime_type,simulated:sendResult.simulated,audio_data:`data:${body?.mime_type||'audio/webm'};base64,${encoded}`})]); run(`UPDATE conversations SET mode='human',unread_count=0,last_message_at=?,updated_at=? WHERE id=?`,[now(),now(),id]); recordHumanReply(conversation,context.user.id); return {id:Number(result.lastInsertRowid),transcript,...sendResult};
   }
 
   if (method === 'POST' && path === '/api/simulate/inbound') {
@@ -842,6 +877,7 @@ export async function routeApi(request, response, url, body, context) {
     const id = parseId(match[1]);
     const ownedDeal=get('SELECT d.*,ct.id AS contact_id FROM deals d JOIN contacts ct ON ct.id=d.contact_id WHERE d.id=? AND ct.company_id=?', [id, context.user.companyId]);
     if (!ownedDeal) throw Object.assign(new Error('Oportunidade não encontrada.'), { statusCode: 404 });
+    if(body.expected_revision!==undefined&&(!Number.isInteger(body.expected_revision)||body.expected_revision!==ownedDeal.revision))throw Object.assign(new Error('Este card foi alterado por outra pessoa ou pela IA. Confira a etapa atual antes de tentar novamente.'),{statusCode:409});
     if (body.title !== undefined) {
       const title=String(body.title||'').trim().slice(0,160);if(!title)throw Object.assign(new Error('Informe o nome do negócio.'),{statusCode:400});
       run('UPDATE deals SET title=?,updated_at=? WHERE id=?',[title,now(),id]);
@@ -1549,7 +1585,7 @@ export async function routeApi(request, response, url, body, context) {
   }
 
   if (method === 'POST' && path === '/api/webhooks/whatsapp') {
-    const outcomes = await processWebhook(body);
+    const outcomes = await processWebhook(body,{deferProcessing:!process.env.VERCEL});
     return { received: true, processed: outcomes.length };
   }
   if (method === 'POST' && path === '/api/webhooks/meta-leads') {
@@ -1559,7 +1595,7 @@ export async function routeApi(request, response, url, body, context) {
   if (method === 'POST' && path.startsWith('/api/webhooks/evolution/')) {
     const companyId = Number(path.split('/').filter(Boolean).at(-1)) || 1;
     if (!get('SELECT id FROM company_profiles WHERE id=?', [companyId])) throw Object.assign(new Error('Empresa do webhook inválida.'), { statusCode: 404 });
-    const outcomes = await processEvolutionWebhook(body, companyId);
+    const outcomes = await processEvolutionWebhook(body, companyId,{deferProcessing:!process.env.VERCEL});
     return { received: true, processed: outcomes.length };
   }
 

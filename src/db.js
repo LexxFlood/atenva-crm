@@ -53,6 +53,10 @@ function addColumns(table, migrations) {
 }
 
 function applyAutomationMigrations() {
+  addColumns('conversations', [['human_pause_until','ALTER TABLE conversations ADD COLUMN human_pause_until TEXT']]);
+  addColumns('deals', [['revision','ALTER TABLE deals ADD COLUMN revision INTEGER NOT NULL DEFAULT 0']]);
+  db.exec(`CREATE TRIGGER IF NOT EXISTS deals_revision AFTER UPDATE ON deals
+    WHEN NEW.revision=OLD.revision BEGIN UPDATE deals SET revision=OLD.revision+1 WHERE id=NEW.id; END`);
   addColumns('company_qualification_config', [
     ['sql_required_fields', `ALTER TABLE company_qualification_config ADD COLUMN sql_required_fields TEXT NOT NULL DEFAULT '["need","timeframe","decision_role"]'`]
   ]);

@@ -15,6 +15,7 @@ const {qualificationConfig,recalculateContactQualification,saveQualificationConf
 const {sendWhatsAppText,sendWhatsAppTemplate}=await import('../src/whatsapp.js');
 const {nextBusinessTime,validateAgentConfig}=await import('../src/automation-policy.js');
 const {routeApi,processScheduledMessages,processWebhook}=await import('../src/api.js');
+const {pauseForHumanReply,resumeExpiredHumanPauses}=await import('../src/team-attendance.js');
 const context={user:{id:1,role:'manager',companyId:1}};
 const stages=all("SELECT s.id,s.local_position FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE p.company_id=1 AND p.kind='sales' ORDER BY s.local_position");
 const originalFetch=globalThis.fetch;
@@ -44,6 +45,100 @@ function inbound(f,text,type='text'){
   const id=Number(run("INSERT INTO messages(conversation_id,direction,sender_type,type,content,status) VALUES (?,'inbound','contact',?,?,'received')",[f.conversationId,type,text]).lastInsertRowid);
   return get('SELECT * FROM messages WHERE id=?',[id]);
 }
+
+test('handoff fica pendente, sincroniza sem enviar mensagens e encerra ao assumir',async()=>{
+  const f=fixture();
+  const result=await processInboundMessage(f.conversationId,inbound(f,'Quero falar com um atendente').id);
+  assert.equal(result.status,'handoff');
+  const live=async(companyId=1)=>routeApi({method:'GET'},null,new URL(`http://local/api/conversations/live?selected=${f.conversationId}`),null,{user:{...context.user,companyId}});
+  const pending=await live();
+  assert.equal(pending.selected.waiting_human,1);
+  assert.match(pending.selected.next_action,/Aguardando atendimento humano/);
+  const unchanged=await routeApi({method:'GET'},null,new URL(`http://local/api/conversations/live?selected=${f.conversationId}&version=${pending.selected_version}`),null,context);
+  assert.equal(unchanged.selected,null);
+  assert.equal(unchanged.selected_version,pending.selected_version);
+  const count=Number(get('SELECT COUNT(*) AS total FROM messages WHERE conversation_id=?',[f.conversationId]).total);
+  await live();
+  assert.equal(Number(get('SELECT COUNT(*) AS total FROM messages WHERE conversation_id=?',[f.conversationId]).total),count);
+  const ignored=await processInboundMessage(f.conversationId,inbound(f,'Pode me ajudar?').id);
+  assert.equal(ignored,null);
+  const other=Number(run("INSERT INTO company_profiles(name,slug,status) VALUES ('Outra conta live','outra-conta-live','active')").lastInsertRowid);
+  assert.equal((await live(other)).selected,null);
+  assert.ok(!(await live(other)).conversations.some(item=>item.id===f.conversationId));
+  await assert.rejects(()=>routeApi({method:'PATCH'},null,new URL(`http://local/api/conversations/${f.conversationId}`),{mode:'human'},{user:{...context.user,companyId:other}}),/Conversa não encontrada/);
+  await routeApi({method:'PATCH'},null,new URL(`http://local/api/conversations/${f.conversationId}`),{mode:'human'},context);
+  assert.equal((await live()).selected.waiting_human,0);
+  assert.equal((await live()).selected.mode,'human');
+});
+
+test('resposta humana retira o cliente da espera sem reativar a IA',async()=>{
+  const f=fixture();
+  await processInboundMessage(f.conversationId,inbound(f,'Quero falar com um atendente').id);
+  await routeApi({method:'POST'},null,new URL(`http://local/api/conversations/${f.conversationId}/messages`),{content:'Olá, vou continuar seu atendimento.'},context);
+  const live=await routeApi({method:'GET'},null,new URL(`http://local/api/conversations/live?selected=${f.conversationId}`),null,context);
+  assert.equal(live.selected.waiting_human,0);
+  assert.equal(live.selected.mode,'human');
+  assert.equal(live.selected.assigned_name,get('SELECT name FROM users WHERE id=1').name);
+});
+
+test('pausa de um minuto reinicia após resposta humana e mantém mensagens na fila',async()=>{
+  const f=fixture();
+  const send=()=>routeApi({method:'POST'},null,new URL(`http://local/api/conversations/${f.conversationId}/messages`),{content:'Um instante, estou verificando.'},context);
+  await send();
+  let row=get('SELECT * FROM conversations WHERE id=?',[f.conversationId]);
+  assert.ok(new Date(row.human_pause_until)-Date.now()>58_000);
+  run('UPDATE conversations SET human_pause_until=? WHERE id=?',[new Date(Date.now()+5000).toISOString(),f.conversationId]);
+  await send();
+  row=get('SELECT * FROM conversations WHERE id=?',[f.conversationId]);
+  assert.ok(new Date(row.human_pause_until)-Date.now()>58_000);
+  const first=inbound(f,'Quanto custa?');const latest=inbound(f,'Qual o valor para minha equipe?');
+  queueInboundMessage(f.conversationId,first.id);queueInboundMessage(f.conversationId,latest.id);
+  const outboundCount=()=>get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n;
+  const before=outboundCount();
+  await processPendingInboundMessages(1);
+  assert.equal(outboundCount(),before);
+  assert.equal(get('SELECT status FROM inbound_agent_jobs WHERE message_id=?',[latest.id]).status,'pending');
+  const past=new Date(Date.now()-1000).toISOString();
+  run('UPDATE conversations SET human_pause_until=? WHERE id=?',[past,f.conversationId]);
+  run('UPDATE inbound_agent_jobs SET next_attempt_at=? WHERE conversation_id=?',[past,f.conversationId]);
+  modelResponse(answer());
+  await processPendingInboundMessages(1);
+  assert.equal(outboundCount(),before+1);
+  assert.equal(get('SELECT mode FROM conversations WHERE id=?',[f.conversationId]).mode,'autopilot');
+  assert.equal(get('SELECT status FROM inbound_agent_jobs WHERE message_id=?',[first.id]).status,'completed');
+});
+
+test('dez executores concorrentes não duplicam respostas da mesma conversa',async()=>{
+  const f=fixture();
+  const message=inbound(f,'Quanto custa?');queueInboundMessage(f.conversationId,message.id);
+  modelResponse(answer());
+  await Promise.all(Array.from({length:10},()=>processPendingInboundMessages(1)));
+  assert.equal(get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n,1);
+  assert.equal(get('SELECT attempts FROM inbound_agent_jobs WHERE message_id=?',[message.id]).attempts,1);
+});
+
+test('resposta humana durante geração impede envio tardio da IA',async()=>{
+  const f=fixture();
+  modelResponse(answer(),()=>pauseForHumanReply(f.conversationId,1));
+  const result=await processInboundMessage(f.conversationId,inbound(f,'Quanto custa?').id);
+  assert.equal(result.status,'superseded_by_human');
+  assert.equal(get("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND direction='outbound'",[f.conversationId]).n,0);
+});
+
+test('movimento humano durante geração prevalece sobre o movimento da IA',async()=>{
+  const f=fixture({complete:true});
+  modelResponse(answer([],{stage_id:stages[3].id,stage_evidence:'Quero avançar'}),()=>run('UPDATE deals SET stage_id=? WHERE id=?',[stages[1].id,f.dealId]));
+  await processInboundMessage(f.conversationId,inbound(f,'Quero avançar').id);
+  assert.equal(get('SELECT stage_id FROM deals WHERE id=?',[f.dealId]).stage_id,stages[1].id);
+});
+
+test('card rejeita revisão antiga sem sobrescrever a alteração anterior',async()=>{
+  const f=fixture();const revision=get('SELECT revision FROM deals WHERE id=?',[f.dealId]).revision;
+  const request=body=>routeApi({method:'PATCH'},null,new URL(`http://local/api/deals/${f.dealId}`),body,context);
+  await request({stage_id:stages[1].id,expected_revision:revision});
+  await assert.rejects(()=>request({stage_id:stages[2].id,expected_revision:revision}),error=>error.statusCode===409);
+  assert.equal(get('SELECT stage_id FROM deals WHERE id=?',[f.dealId]).stage_id,stages[1].id);
+});
 function modelResponse(payload,hook){
   Object.assign(process.env,{AI_API_URL:'https://model.invalid/v1/chat/completions',AI_API_KEY:'test-key',AI_MODEL:'test-model',AI_GATEWAY_API_KEY:'different-gateway-key'});
   globalThis.fetch=async(url,options)=>{

@@ -124,6 +124,9 @@ async function releaseDatabaseLease(lease) {
 // Serializa o acesso SQLite dentro da instância e usa uma reserva distribuída
 // para mutações. Assim, duas Functions nunca sobrescrevem snapshots uma da outra.
 export function withSynchronizedDatabase({ write = false, reload }, callback) {
+  // A single persistent SQLite process can serve reads while an external model
+  // request is awaiting I/O. Snapshot deployments still need the distributed lease.
+  if(!configuration())return Promise.resolve().then(callback);
   const operation = async () => {
     const lease = write ? await acquireDatabaseLease() : null;
     activeLeaseToken = lease?.token || '';

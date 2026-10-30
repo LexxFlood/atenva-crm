@@ -125,7 +125,11 @@ test/                testes automatizados
 
 ```powershell
 npm test
+npm run test:team
+npm run test:queue
 ```
+
+Os testes de equipe usam 10 sessões autenticadas e dados fictícios. Consulte [`docs/validacao-equipe.md`](docs/validacao-equipe.md) para os testes de navegador, retomada após 60 segundos, fila persistente e limites da validação local.
 
 ## Antes de produção
 
@@ -136,3 +140,4 @@ Consulte:
 - [`docs/SECURITY.md`](docs/SECURITY.md) — vulnerabilidades, correções e riscos residuais.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — instalação profissional por cliente.
 - [`docs/CLIENT-HANDOFF.md`](docs/CLIENT-HANDOFF.md) — checklist de onboarding e go-live.
+- [`docs/validacao-equipe.md`](docs/validacao-equipe.md) — sincronização, fila, disputa de atendimento e proteção de cards.

@@ -232,7 +232,7 @@ export async function sendEvolutionAudio(to, audioBase64, companyId = 1) {
 }
 
 function messageText(message = {}) {
-  return message.conversation || message.extendedTextMessage?.text || message.imageMessage?.caption || message.videoMessage?.caption || message.documentMessage?.caption || '';
+  return message.conversation || message.extendedTextMessage?.text || message.buttonsResponseMessage?.selectedDisplayText || message.listResponseMessage?.title || message.imageMessage?.caption || message.videoMessage?.caption || message.documentMessage?.caption || '';
 }
 
 export function extractEvolutionWebhookEvents(payload) {
@@ -245,11 +245,15 @@ export function extractEvolutionWebhookEvents(payload) {
   if (!event.includes('messages.upsert')) return [];
   const entries = Array.isArray(data) ? data : [data];
   return entries.filter(item => !item?.key?.fromMe && item?.key?.remoteJid && !String(item.key.remoteJid).endsWith('@g.us')).map(item => {
-    const rawMessage = item.message || {};
+    let rawMessage = item.message || {};
+    for(let depth=0;depth<4;depth++){
+      const wrapped=rawMessage.ephemeralMessage?.message||rawMessage.viewOnceMessage?.message||rawMessage.viewOnceMessageV2?.message||rawMessage.documentWithCaptionMessage?.message;
+      if(!wrapped)break;rawMessage=wrapped;
+    }
     const jid = String(item.key.remoteJid);
     const from = jid.split('@')[0].replace(/\D/g, '');
-    const typeKey = Object.keys(rawMessage)[0] || 'text';
-    const type = typeKey.replace(/Message$/, '').toLowerCase();
+    const typeKey = Object.keys(rawMessage).find(key=>!['messageContextInfo','senderKeyDistributionMessage'].includes(key)) || 'text';
+    const type = ({conversation:'text',extendedTextMessage:'text',buttonsResponseMessage:'button',listResponseMessage:'interactive'})[typeKey]||typeKey.replace(/Message$/, '').toLowerCase();
     return {
       kind: 'message',
       externalId: item.key.id,
