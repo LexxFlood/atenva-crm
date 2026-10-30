@@ -1,4 +1,5 @@
-import { all, asJson, get, now, run, transaction } from './db.js';
+import { all, asJson, db, databasePath, get, now, run, transaction } from './db.js';
+import { persistDatabaseSnapshot } from './remote-snapshot.js';
 import { sendWhatsAppTemplate, sendWhatsAppText } from './whatsapp.js';
 
 const sourceLabels={manual:'Cadastro manual',whatsapp:'WhatsApp',instagram:'Instagram',facebook:'Facebook',meta_ads:'Meta Ads',google_ads:'Google Ads',indicacao:'Indicação',organico:'Orgânico',outro:'Outro'};
@@ -112,27 +113,35 @@ export function stopCadencesForContact(companyId,contactId,reason='reply_receive
 
 function fillMessage(text,contact){return String(text||'').replace(/{{\s*nome\s*}}/gi,contact.name||'').replace(/{{\s*empresa\s*}}/gi,contact.company||'').replace(/{{\s*telefone\s*}}/gi,contact.phone||'');}
 
-export async function processCadences(companyId=null){
+export async function processCadences(companyId=null,deadline=Date.now()+90_000){
+  run("UPDATE relationship_cadence_enrollments SET status='failed',stop_reason='Execução interrompida; conferir o envio.',updated_at=? WHERE status='active' AND claimed_at IS NOT NULL AND datetime(claimed_at)<datetime('now','-10 minutes') AND (? IS NULL OR company_id=?)",[now(),companyId,companyId]);
   const params=[];let filter='';if(companyId){filter='AND e.company_id=?';params.push(companyId);}
   const due=all(`SELECT e.*,c.stop_on_reply,c.stop_on_outcome,s.id AS step_id,s.position,s.delay_hours,s.action_type,s.template_id,s.message,s.task_title,s.task_description,
     ct.name,ct.phone,ct.company,ct.consent_status,d.owner_id FROM relationship_cadence_enrollments e JOIN relationship_cadences c ON c.id=e.cadence_id
     JOIN relationship_cadence_steps s ON s.cadence_id=e.cadence_id AND s.position=e.current_step JOIN contacts ct ON ct.id=e.contact_id LEFT JOIN deals d ON d.id=e.deal_id
-    WHERE e.status='active' AND c.status='active' AND datetime(e.next_run_at)<=datetime('now') ${filter} ORDER BY e.next_run_at,e.id LIMIT 50`,params);
+    WHERE e.status='active' AND e.claimed_at IS NULL AND c.status='active' AND datetime(e.next_run_at)<=datetime('now') ${filter} ORDER BY e.next_run_at,e.id LIMIT 50`,params);
   const results=[];
-  for(const item of due){let status='created',externalId=null,error=null;try{
+  for(const item of due){let status='created',externalId=null,error=null;
+    if(Date.now()+25_000>deadline)break;
+    const claim=run("UPDATE relationship_cadence_enrollments SET claimed_at=? WHERE id=? AND status='active' AND current_step=? AND claimed_at IS NULL",[now(),item.id,item.current_step]);
+    if(!claim.changes)continue;
+    try{
+      await persistDatabaseSnapshot(databasePath,db);
       if(item.action_type==='task')run(`INSERT INTO tasks(company_id,contact_id,deal_id,conversation_id,assigned_to,title,description,due_at,type,priority,status,created_by) VALUES (?,?,?,?,?,?,?,?,'followup','normal','pending','system')`,[item.company_id,item.contact_id,item.deal_id,item.conversation_id,item.owner_id,fillMessage(item.task_title,item),fillMessage(item.task_description,item)||null,now()]);
       else{
         if(item.consent_status==='revoked')throw new Error('Contato sem consentimento para receber mensagens.');
         if(!item.conversation_id)throw new Error('O contato ainda não possui uma conversa de WhatsApp.');
         const phone=String(item.phone||'').replace(/\D/g,'');if(!phone)throw new Error('Contato sem telefone válido.');
-        let sent;if(item.template_id){const template=get("SELECT * FROM message_templates WHERE id=? AND company_id=? AND status='approved'",[item.template_id,item.company_id]);if(!template)throw new Error('Modelo aprovado não encontrado.');sent=await sendWhatsAppTemplate(phone,{name:template.provider_name||template.meta_name,language:template.language,variables:[]},item.company_id);}else sent=await sendWhatsAppText(phone,fillMessage(item.message,item),item.company_id);
-        externalId=sent.id;run(`INSERT INTO messages(conversation_id,whatsapp_message_id,direction,sender_type,content,status,metadata) VALUES (?,?,'outbound','system',?,'sent',?)`,[item.conversation_id,sent.id,fillMessage(item.message,item)||'[modelo aprovado]',JSON.stringify({cadence_id:item.cadence_id,enrollment_id:item.id,step:item.position,simulated:sent.simulated})]);status='sent';
+        let sent;if(item.template_id){const template=get("SELECT * FROM message_templates WHERE id=? AND company_id=? AND source='meta' AND status='approved'",[item.template_id,item.company_id]);if(!template)throw new Error('Modelo aprovado não encontrado.');sent=await sendWhatsAppTemplate(phone,{name:template.provider_name||template.meta_name,language:template.language,variables:[]},item.company_id);}else sent=await sendWhatsAppText(phone,fillMessage(item.message,item),item.company_id,{conversationId:item.conversation_id});
+        externalId=sent.id;run(`INSERT INTO messages(conversation_id,whatsapp_message_id,direction,sender_type,content,status,metadata) VALUES (?,?,'outbound','system',?,?,?)`,[item.conversation_id,sent.id,fillMessage(item.message,item)||'[modelo aprovado]',sent.status,JSON.stringify({cadence_id:item.cadence_id,enrollment_id:item.id,step:item.position,simulated:sent.simulated})]);status=sent.simulated?'skipped':'sent';
       }
       const next=get('SELECT * FROM relationship_cadence_steps WHERE cadence_id=? AND position>? ORDER BY position LIMIT 1',[item.cadence_id,item.position]);
       if(next)run('UPDATE relationship_cadence_enrollments SET current_step=?,next_run_at=?,updated_at=? WHERE id=? AND status=\'active\'',[next.position,new Date(Date.now()+Number(next.delay_hours||0)*3600000).toISOString(),now(),item.id]);
       else run("UPDATE relationship_cadence_enrollments SET status='completed',next_run_at=NULL,updated_at=? WHERE id=? AND status='active'",[now(),item.id]);
     }catch(caught){status='failed';error=String(caught.message||caught).slice(0,500);run("UPDATE relationship_cadence_enrollments SET status='failed',stop_reason=?,updated_at=? WHERE id=?",[error,now(),item.id]);}
+    run('UPDATE relationship_cadence_enrollments SET claimed_at=NULL WHERE id=?',[item.id]);
     run(`INSERT INTO relationship_cadence_runs(enrollment_id,step_id,status,scheduled_at,executed_at,external_id,error,metadata) VALUES (?,?,?,?,?,?,?,?)`,[item.id,item.step_id,status,item.next_run_at,now(),externalId,error,JSON.stringify({action_type:item.action_type})]);results.push({id:item.id,status,error});
+    await persistDatabaseSnapshot(databasePath,db);
   }
   return {processed:results.length,sent:results.filter(item=>item.status==='sent').length,created:results.filter(item=>item.status==='created').length,failed:results.filter(item=>item.status==='failed').length,results};
 }

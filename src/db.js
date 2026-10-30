@@ -12,7 +12,8 @@ mkdirSync(dirname(databasePath), { recursive: true });
 await hydrateDatabaseFile(databasePath);
 
 export let db = new DatabaseSync(databasePath);
-db.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
+const schemaSql=readFileSync(join(here, 'schema.sql'), 'utf8');
+db.exec(schemaSql);
 
 // Migra bancos criados por versões anteriores sem apagar dados do cliente.
 const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map(column => column.name));
@@ -50,6 +51,21 @@ function addColumns(table, migrations) {
   const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(column => column.name));
   for (const [column, statement] of migrations) if (!columns.has(column)) db.exec(statement);
 }
+
+function applyAutomationMigrations() {
+  addColumns('company_qualification_config', [
+    ['sql_required_fields', `ALTER TABLE company_qualification_config ADD COLUMN sql_required_fields TEXT NOT NULL DEFAULT '["need","timeframe","decision_role"]'`]
+  ]);
+  addColumns('scheduled_messages', [
+    ['attempts', 'ALTER TABLE scheduled_messages ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0'],
+    ['claimed_at', 'ALTER TABLE scheduled_messages ADD COLUMN claimed_at TEXT'],
+    ['last_error', 'ALTER TABLE scheduled_messages ADD COLUMN last_error TEXT']
+  ]);
+  addColumns('relationship_cadence_enrollments', [
+    ['claimed_at', 'ALTER TABLE relationship_cadence_enrollments ADD COLUMN claimed_at TEXT']
+  ]);
+}
+applyAutomationMigrations();
 
 addColumns('company_profiles', [
   ['plan', "ALTER TABLE company_profiles ADD COLUMN plan TEXT NOT NULL DEFAULT 'business'"],
@@ -319,6 +335,8 @@ export async function reloadDatabaseFromSnapshot(leaseToken = '') {
     const hydrated = await hydrateDatabaseFile(databasePath, leaseToken);
     db = new DatabaseSync(databasePath);
     db.exec('PRAGMA foreign_keys=ON');
+    db.exec(schemaSql);
+    applyAutomationMigrations();
     normalizeCanonicalCompanySlugs(db);
     return hydrated;
   } catch (error) {

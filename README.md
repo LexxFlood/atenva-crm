@@ -4,7 +4,7 @@ MVP funcional de um CRM WhatsApp-first com agente comercial autónomo, caixa de 
 
 ## Executar
 
-Requisito: Node.js 22.5 ou superior. Não é necessário instalar pacotes.
+Requisito: Node.js 24.x. Instale as dependências com `npm ci`.
 
 No Windows, abra `INICIAR.cmd`. Alternativamente:
 
@@ -69,10 +69,12 @@ META_MARKETING_LOGIN_CONFIG_ID=
 META_WHATSAPP_EMBEDDED_SIGNUP_CONFIG_ID=
 ```
 
-Sem essas variáveis, os envios são simulados e ficam registados no CRM. O arquivo `.env` é carregado automaticamente quando o servidor inicia.
+Sem uma conexão validada, os envios são bloqueados. Para testes locais, ative explicitamente `WHATSAPP_SIMULATE=true`: as mensagens aparecem como **Simulação**, sem entrega real. Essa opção não funciona em produção. O arquivo `.env` é carregado automaticamente quando o servidor inicia.
 As credenciais salvas pela interface são cifradas antes de serem gravadas no banco. Em produção, defina também `INTEGRATION_ENCRYPTION_KEY` com um segredo exclusivo.
 
 ## Ligar a um modelo de IA
+
+Consulte [operação de WhatsApp e qualificação](docs/WHATSAPP-IA-OPERACAO.md) para configurar os critérios comerciais, acompanhamentos, executor e roteiro de homologação.
 
 Em produção na Vercel, o agente usa o AI Gateway com o token OIDC injetado automaticamente e o modelo definido em `AI_GATEWAY_MODEL` (padrão: `openai/gpt-5.4-mini`). Fora da Vercel, configure uma chave do Gateway:
 

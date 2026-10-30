@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
+  "crons": [{ "path": "/api/cron/scheduled-messages", "schedule": "0 12 * * *" }],
   "builds": [
     { "src": "server.js", "use": "@vercel/node" }
   ],

@@ -29,7 +29,7 @@ function verifySignedSession(token = '') {
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
   try {
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!Number.isInteger(claims.u) || !claims.c || !claims.e || new Date(claims.e) <= new Date()) return null;
+    if (!Number.isInteger(claims.u) || !Number.isInteger(claims.s) || claims.s < 1 || !claims.c || !claims.e || new Date(claims.e) <= new Date()) return null;
     return claims;
   } catch { return null; }
 }
@@ -184,6 +184,7 @@ export function login({ email, password, ip, userAgent, companySlug = '' }) {
   const createdSession = run(`INSERT INTO sessions (user_id, token_hash, csrf_token, ip_hash, user_agent, expires_at)
     VALUES (?, ?, ?, ?, ?, ?)`, [user.id, sha256(nonce), csrfToken, hashedIp, String(userAgent || '').slice(0, 300), expiresAt]);
   const token = signSession({ u: user.id, c: csrfToken, e: expiresAt, s: Number(createdSession.lastInsertRowid) });
+  run('UPDATE sessions SET token_hash=? WHERE id=?', [sha256(token), Number(createdSession.lastInsertRowid)]);
   run('UPDATE users SET failed_login_count=0, locked_until=NULL, last_login_at=? WHERE id=?', [now(), user.id]);
   run(`INSERT INTO security_events (user_id, event_type, ip_hash) VALUES (?, 'login_success', ?)`, [user.id, hashedIp]);
   return { user: publicUser(userWithCompany(user.id)), csrfToken, cookie: cookieValue(token, sessionHours * 3600) };
@@ -194,6 +195,10 @@ export function authenticate(request) {
   if (!token || token.length > 1000) return null;
   const claims = verifySignedSession(token);
   if (!claims) return null;
+  const session = get(`SELECT id FROM sessions
+    WHERE id=? AND user_id=? AND token_hash=? AND csrf_token=? AND expires_at>?`,
+  [claims.s, claims.u, sha256(token), claims.c, now()]);
+  if (!session) return null;
   const user = userWithCompany(claims.u);
   if (!user?.is_active) return null;
   if (!user.is_master && !companyAccessIsActive(user)) return null;

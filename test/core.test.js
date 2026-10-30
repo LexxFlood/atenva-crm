@@ -11,6 +11,7 @@ for (const suffix of ['', '-shm', '-wal']) {
   if (existsSync(testDatabase + suffix)) unlinkSync(testDatabase + suffix);
 }
 process.env.DATABASE_PATH = testDatabase;
+process.env.WHATSAPP_SIMULATE = 'true';
 
 const { db, get, run } = await import('../src/db.js');
 const { seed } = await import('../src/seed.js');
@@ -147,10 +148,13 @@ test('cria, autentica e revoga uma sessão segura', () => {
   assert.equal(auth.user.id, 1);
   assert.equal(auth.user.email, 'ana@verdecrm.local');
   run('DELETE FROM sessions WHERE id=?', [auth.sessionId]);
-  assert.equal(authenticate({ headers: { cookie: `verde_session=${encodeURIComponent(token)}` } }).user.id, 1);
+  assert.equal(authenticate({ headers: { cookie: `verde_session=${encodeURIComponent(token)}` } }), null);
   assert.doesNotThrow(() => requireRole(auth, ['manager']));
   assert.throws(() => requireRole(auth, ['agent']), /permissão/);
-  logout(auth, '127.0.0.1');
+  const secondToken=decodeURIComponent(secondSession.cookie.match(/verde_session=([^;]+)/)[1]);
+  const secondAuth=authenticate({headers:{cookie:`verde_session=${encodeURIComponent(secondToken)}`}});
+  logout(secondAuth, '127.0.0.1');
+  assert.equal(authenticate({headers:{cookie:`verde_session=${encodeURIComponent(secondToken)}`}}),null);
   assert.equal(authenticate({ headers: { cookie: 'verde_session=' } }), null);
 });
 
@@ -274,8 +278,10 @@ test('conversa avança o card automaticamente conforme os sinais configurados na
   const stages=db.prepare('SELECT id FROM pipeline_stages WHERE pipeline_id=? ORDER BY local_position').all(pipeline.id);const target=stages[2];
   await routeApi({method:'PUT'},null,new URL('http://local/api/pipeline-conversation-rules'),{pipeline_id:pipeline.id,rules:[{stage_id:target.id,trigger_phrases:['quero avançar','vamos marcar a apresentação']}]},context);
   const contactId=Number(run("INSERT INTO contacts(company_id,phone,name,company) VALUES (1,'+5511999990088','Lead automação','Empresa áudio')").lastInsertRowid);
+  run('UPDATE contacts SET custom_fields=? WHERE id=?',[JSON.stringify({commercial:{need:{value:'Organizar vendas'},timeframe:{value:'Este mês'},decision_role:{value:'Sou responsável'}}}),contactId]);
   const conversationId=Number(run('INSERT INTO conversations(contact_id,assigned_to) VALUES (?,1)',[contactId]).lastInsertRowid);
   const deal=await routeApi({method:'POST'},null,new URL('http://local/api/deals'),{title:'Teste de avanço pela conversa',contact_id:contactId,stage_id:stages[0].id},context);
+  run("INSERT INTO tasks(company_id,contact_id,deal_id,title,type,status,google_event_id,due_at) VALUES (1,?,?,'Demonstração confirmada','meeting','pending','calendar-test',?)",[contactId,deal.id,new Date(Date.now()+3600000).toISOString()]);
   const messageId=Number(run("INSERT INTO messages(conversation_id,direction,sender_type,content,status) VALUES (?,'inbound','contact',?,'received')",[conversationId,'Quero saber como funciona e quero avançar com vocês.']).lastInsertRowid);
   await processInboundMessage(conversationId,messageId);
   assert.equal(get('SELECT stage_id FROM deals WHERE id=?',[deal.id]).stage_id,target.id);
@@ -361,6 +367,8 @@ test('Cloud API oficial isola empresas, roteia webhooks e tem prioridade sobre E
   globalThis.fetch=async(url,options={})=>{requests.push({url:String(url),options});if(phase==='connect')return {ok:true,json:async()=>requests.length%2?{display_phone_number:'+55 11 98888-7777',verified_name:'Cliente Cloud',quality_rating:'GREEN'}:{success:true}};if(String(url).includes('/media'))return {ok:true,json:async()=>({id:'media-1'})};return {ok:true,json:async()=>({messages:[{id:'wamid.cloud'}]})};};
   try{
     const connected=await routeApi({method:'POST'},null,new URL('http://local/api/meta/test'),{},context);assert.equal(connected.connected,true);phase='send';requests.length=0;
+    const serviceContact=Number(run("INSERT INTO contacts(company_id,phone,name) VALUES (?,'+551198887766','Contato Cloud')",[companyId]).lastInsertRowid);
+    run('INSERT INTO conversations(contact_id,customer_window_until) VALUES (?,?)',[serviceContact,new Date(Date.now()+3600000).toISOString()]);
     const sent=await sendWhatsAppText('551198887766','Mensagem oficial',companyId);assert.equal(sent.simulated,false);assert.match(requests[0].url,/222222\/messages/);assert.equal(requests[0].options.headers.Authorization,'Bearer cloud-token-2');
     const audio=await sendWhatsAppAudio('551198887766',Buffer.from('audio-test').toString('base64'),companyId);assert.equal(audio.simulated,false);assert.ok(requests.some(item=>item.url.includes('/222222/media')));
     await routeApi({method:'PUT'},null,new URL('http://local/api/agent/config'),{autonomy_level:0},context);
@@ -402,7 +410,7 @@ test('qualifica Lead, MQL e SQL usando pontuação e Kanban', async () => {
   const context = { user: { id: 1, role: 'manager' } };
   const stages = await routeApi({ method: 'GET' }, null, new URL('http://local/api/qualification/config'), {}, context);
   await routeApi({ method: 'PUT' }, null, new URL('http://local/api/qualification/config'), {
-    mql_min_score: 50, sql_min_score: 80, mql_stage_id: stages.stages[1].id, sql_stage_id: stages.stages[2].id, required_fields: ['phone', 'company'], auto_move: true
+    mql_min_score: 50, sql_min_score: 80, mql_stage_id: stages.stages[1].id, sql_stage_id: stages.stages[2].id, required_fields: ['phone', 'company'], sql_required_fields: [], auto_move: true
   }, context);
   assert.ok(get("SELECT COUNT(*) AS count FROM contacts WHERE qualification='mql'").count > 0);
   assert.ok(get("SELECT COUNT(*) AS count FROM contacts WHERE qualification='sql'").count > 0);

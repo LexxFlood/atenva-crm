@@ -1,7 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { all, asJson, db, ensureCompanyPipelines, get, now, run, transaction } from './db.js';
-import { agentModelStatus, companyAgentConfig, ensureCompanyAgentConfig, planAgentCommand, previewAgentResponse, processInboundMessage } from './agent.js';
-import { downloadWhatsAppMedia, extractWebhookEvents, sendWhatsAppAudio, sendWhatsAppText } from './whatsapp.js';
+import { all, asJson, db, databasePath, ensureCompanyPipelines, get, now, run, transaction } from './db.js';
+import { agentModelStatus, companyAgentConfig, ensureCompanyAgentConfig, planAgentCommand, previewAgentResponse, processInboundMessage, processPendingInboundMessages, queueInboundMessage } from './agent.js';
+import { customerWindowIsOpen, downloadWhatsAppMedia, extractWebhookEvents, sendWhatsAppAudio, sendWhatsAppTemplate, sendWhatsAppText, whatsappDeliveryStatus } from './whatsapp.js';
+import { persistDatabaseSnapshot } from './remote-snapshot.js';
+import { validateAgentConfig } from './automation-policy.js';
+import { runStageAutomations } from './pipeline-automation.js';
 import { hashPassword, requireRole, verifyPassword } from './auth.js';
 import { activateMetaLeadRetrieval, companyForMetaIdentifiers, companyForMetaPage, completeWhatsAppEmbeddedSignup, fetchMetaLead, metaAdAccounts, metaAdCampaigns, metaAdsInsights, metaAuthorizationUrl, metaBusinesses, metaIsConfigured, metaLeadForms, metaOauthStatus, metaPages, publicMetaConfig, saveMetaConfig, selectMetaBusiness, selectWhatsAppNumber, syncMetaAnalytics, syncMetaMarketing, testMetaConnection } from './integrations.js';
 import { qualificationConfig, recalculateContactQualification, recalculateQualifications, saveQualificationConfig } from './qualification.js';
@@ -28,13 +31,30 @@ function canAdminCompany(context) {
 
 async function transcribeAudio(dataBase64, mimeType) {
   const audio=Buffer.from(dataBase64,'base64');
-  const key=process.env.OPENAI_API_KEY||process.env.AI_API_KEY;
+  const key=process.env.TRANSCRIPTION_API_KEY||process.env.OPENAI_API_KEY||(process.env.AI_API_URL?process.env.AI_API_KEY:null);
   if(key){
-    const configured=String(process.env.AI_API_URL||'https://api.openai.com/v1').replace(/\/chat\/completions\/?$/,'').replace(/\/$/,'');
-    const form=new FormData(); form.append('file',new Blob([audio],{type:mimeType||'audio/webm'}),'audio.webm'); form.append('model',process.env.TRANSCRIPTION_MODEL||'whisper-1'); form.append('language','pt');
-    const response=await fetch(`${configured}/audio/transcriptions`,{method:'POST',headers:{Authorization:`Bearer ${key}`},body:form}); const payload=await response.json().catch(()=>({})); if(!response.ok)throw Object.assign(new Error(payload.error?.message||'Não foi possível transcrever o áudio.'),{statusCode:502}); return String(payload.text||'Áudio sem fala identificável.').slice(0,4000);
+    const configured=String(process.env.TRANSCRIPTION_API_URL||(process.env.OPENAI_API_KEY?'https://api.openai.com/v1':process.env.AI_API_URL)||'https://api.openai.com/v1').replace(/\/chat\/completions\/?$/,'').replace(/\/$/,'');
+    const model=process.env.TRANSCRIPTION_MODEL||(new URL(configured).hostname==='api.groq.com'?'whisper-large-v3-turbo':'whisper-1');
+    const extension=({'audio/ogg':'ogg','audio/mp4':'m4a','audio/mpeg':'mp3'})[String(mimeType).split(';')[0]]||'webm';
+    const form=new FormData(); form.append('file',new Blob([audio],{type:mimeType||'audio/webm'}),`audio.${extension}`); form.append('model',model); form.append('language','pt');
+    const response=await fetch(`${configured}/audio/transcriptions`,{method:'POST',headers:{Authorization:`Bearer ${key}`},body:form,signal:AbortSignal.timeout(20_000)}); const payload=await response.json().catch(()=>({})); if(!response.ok)throw Object.assign(new Error(payload.error?.message||'Não foi possível transcrever o áudio.'),{statusCode:502}); return String(payload.text||'Áudio sem fala identificável.').slice(0,4000);
   }
-  return 'Áudio recebido. A transcrição automática será ativada após a autorização do provedor de IA.';
+  return '[Áudio sem transcrição] Atendimento humano necessário para ouvir esta mensagem.';
+}
+
+async function inboundAudioText(base64,mimeType,fallback){
+  if(!base64)return fallback;
+  try{return await transcribeAudio(base64,mimeType);}
+  catch{return '[Áudio sem transcrição] Não foi possível transcrever. A equipe deve ouvir a mensagem no WhatsApp.';}
+}
+
+function previouslyReceived(event,companyId){
+  const previous=get(`SELECT m.id,m.conversation_id,ct.company_id FROM messages m JOIN conversations c ON c.id=m.conversation_id
+    JOIN contacts ct ON ct.id=c.contact_id WHERE m.whatsapp_message_id=?`,[event.externalId]);
+  if(!previous)return false;
+  if(previous.company_id!==companyId)throw Object.assign(new Error('Mensagem associada a outra empresa.'),{statusCode:409});
+  queueInboundMessage(previous.conversation_id,previous.id);
+  return true;
 }
 function syncPlaybook(content, companyId = 1) {
   const text=String(content||''); const tone=text.match(/(?:tom de voz|tom)\s*[:\-]\s*([^\n.]{4,160})/i)?.[1]; const objective=text.match(/(?:objetivo principal|objetivo)\s*[:\-]\s*([^\n]{4,300})/i)?.[1]; const name=text.match(/(?:nome do agente|agente)\s*[:\-]\s*([\p{L} ]{2,40})/iu)?.[1]?.trim(); const mql=Number(text.match(/MQL[^\d]{0,30}(\d{1,3})/i)?.[1]); const sql=Number(text.match(/SQL[^\d]{0,30}(\d{1,3})/i)?.[1]);
@@ -164,19 +184,6 @@ function createOutcomeFollowup(deal, target, outcome, userId) {
   const id=Number(result.lastInsertRowid);run(`INSERT INTO activities(contact_id,deal_id,actor_type,actor_id,action,description) VALUES (?,?,'system',?,'outcome_automation',?)`,[deal.contact_id,id,userId,`Automação de ${outcome==='lost'?'perda':'ganho'} criou uma oportunidade em outro funil.`]);return id;
 }
 
-function runStageAutomations(dealId, stageId, companyId, userId) {
-  const deal = get('SELECT * FROM deals WHERE id=?', [dealId]);
-  if (!deal) return;
-  const automations = all(`SELECT * FROM pipeline_automations WHERE company_id=? AND is_active=1 AND trigger_type='stage_entered' AND trigger_stage_id=?`, [companyId, stageId]);
-  for (const automation of automations) {
-    if (automation.action_type === 'move_deal' && automation.target_stage_id && automation.target_stage_id !== stageId) run('UPDATE deals SET stage_id=?,updated_at=? WHERE id=?', [automation.target_stage_id,now(),dealId]);
-    if (automation.action_type === 'add_tag' && automation.action_value) run('INSERT OR IGNORE INTO contact_tags(contact_id,tag) VALUES (?,?)', [deal.contact_id,automation.action_value]);
-    if (automation.action_type === 'create_task') run(`INSERT INTO tasks(company_id,contact_id,deal_id,assigned_to,title,due_at,type,created_by)
-      VALUES (?,?,?,?,?,?,'followup','system')`, [companyId,deal.contact_id,dealId,deal.owner_id,automation.action_value || `Acompanhar ${deal.title}`,new Date(Date.now()+24*3_600_000).toISOString()]);
-    run(`INSERT INTO activities(contact_id,deal_id,actor_type,actor_id,action,description) VALUES (?,?,'system',?,'pipeline_automation',?)`, [deal.contact_id,dealId,userId,`Automação executada: ${automation.name}.`]);
-  }
-}
-
 function dateRange(url) {
   const end = /^\d{4}-\d{2}-\d{2}$/.test(url.searchParams.get('end') || '') ? url.searchParams.get('end') : new Date().toISOString().slice(0, 10);
   const fallback = new Date(`${end}T12:00:00Z`); fallback.setUTCDate(fallback.getUTCDate() - 29);
@@ -285,66 +292,107 @@ function getConversation(id, companyId) {
 }
 
 export async function processScheduledMessages(companyId = null) {
+  const deadline=Date.now()+90_000;
+  run(`UPDATE scheduled_messages SET status='failed',last_error='Execução interrompida; confira o envio antes de tentar novamente.'
+    WHERE status='scheduled' AND claimed_at IS NOT NULL AND datetime(claimed_at)<datetime('now','-10 minutes') AND conversation_id IN
+    (SELECT c.id FROM conversations c JOIN contacts ct ON ct.id=c.contact_id WHERE (? IS NULL OR ct.company_id=?))`,[companyId,companyId]);
   const params=[];let companyFilter='';
   if(companyId){companyFilter='AND ct.company_id=?';params.push(companyId);}
   const due=all(`SELECT sm.*,c.contact_id,ct.company_id,ct.phone FROM scheduled_messages sm
     JOIN conversations c ON c.id=sm.conversation_id JOIN contacts ct ON ct.id=c.contact_id
-    WHERE sm.status='scheduled' AND datetime(sm.send_at)<=datetime('now') ${companyFilter}
+    WHERE sm.status='scheduled' AND sm.claimed_at IS NULL AND datetime(sm.send_at)<=datetime('now') ${companyFilter}
     ORDER BY sm.send_at,sm.id LIMIT 50`,params);
   const results=[];
   for(const item of due){
+    if(Date.now()+25_000>deadline)break;
     const payload=asJson(item.payload,{});const content=String(payload.content||'').trim();
     if(!content){run("UPDATE scheduled_messages SET status='failed' WHERE id=? AND status='scheduled'",[item.id]);results.push({id:item.id,status:'failed'});continue;}
+    const claim=run("UPDATE scheduled_messages SET claimed_at=?,attempts=attempts+1 WHERE id=? AND status='scheduled' AND claimed_at IS NULL",[now(),item.id]);
+    if(!claim.changes)continue;
     try{
+      await persistDatabaseSnapshot(databasePath,db);
       const signedContent=appendHumanSignature(item.company_id,payload.created_by,content);
-      const sent=await sendWhatsAppText(String(item.phone||'').replace(/\D/g,''),signedContent,item.company_id);
+      let sent;
+      if(item.template_id){
+        const template=get("SELECT * FROM message_templates WHERE id=? AND company_id=? AND source='meta' AND status='approved'",[item.template_id,item.company_id]);
+        if(!template)throw Object.assign(new Error('Modelo aprovado não encontrado para esta empresa.'),{retryable:false});
+        sent=await sendWhatsAppTemplate(String(item.phone||'').replace(/\D/g,''),{name:template.provider_name||template.meta_name,language:template.language,variables:payload.variables||[]},item.company_id);
+      }else sent=await sendWhatsAppText(String(item.phone||'').replace(/\D/g,''),signedContent,item.company_id,{conversationId:item.conversation_id});
       const claimed=run("UPDATE scheduled_messages SET status='sent' WHERE id=? AND status='scheduled'",[item.id]);
       if(!claimed.changes)continue;
       run(`INSERT INTO messages(conversation_id,whatsapp_message_id,direction,sender_type,sender_id,content,status,metadata)
         VALUES (?,?,'outbound','system',?,?,?,?)`,[item.conversation_id,sent.id,payload.created_by||null,signedContent,sent.status,JSON.stringify({scheduled_message_id:item.id,kind:payload.kind||'followup',simulated:sent.simulated})]);
       run('UPDATE conversations SET last_message_at=?,updated_at=? WHERE id=?',[now(),now(),item.conversation_id]);
-      results.push({id:item.id,status:'sent'});
-    }catch(error){run("UPDATE scheduled_messages SET status='failed',payload=? WHERE id=? AND status='scheduled'",[JSON.stringify({...payload,error:String(error.message||error).slice(0,300)}),item.id]);results.push({id:item.id,status:'failed',error:error.message});}
+      results.push({id:item.id,status:sent.simulated?'simulated':'sent'});
+    }catch(error){
+      const retry=error.retryable===true && item.attempts+1<3;
+      run("UPDATE scheduled_messages SET status=?,claimed_at=NULL,send_at=?,last_error=?,payload=? WHERE id=? AND status='scheduled'",
+        [retry?'scheduled':'failed',retry?new Date(Date.now()+60_000*2**item.attempts).toISOString():item.send_at,String(error.message).slice(0,500),JSON.stringify({...payload,error:String(error.message||error).slice(0,300)}),item.id]);
+      results.push({id:item.id,status:retry?'retry_scheduled':'failed',error:error.message});
+    }
+    await persistDatabaseSnapshot(databasePath,db);
   }
-  const cadences=await processCadences(companyId);
-  return {processed:results.length+cadences.processed,sent:results.filter(item=>item.status==='sent').length+cadences.sent,created:cadences.created,failed:results.filter(item=>item.status==='failed').length+cadences.failed,results,cadences};
+  const inbound=await processPendingInboundMessages(companyId,null,deadline);
+  const cadences=await processCadences(companyId,deadline);
+  const result={processed:results.length+cadences.processed+inbound.processed,sent:results.filter(item=>item.status==='sent').length+cadences.sent,simulated:results.filter(item=>item.status==='simulated').length,created:cadences.created,failed:results.filter(item=>item.status==='failed').length+cadences.failed+inbound.failed,results,cadences,inbound};
+  if(companyId===null)run('INSERT INTO automation_health(id,last_run_at,result) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET last_run_at=excluded.last_run_at,result=excluded.result',[now(),JSON.stringify({processed:result.processed,failed:result.failed})]);
+  return result;
+}
+
+function automationStatus(companyId) {
+  const health=get('SELECT last_run_at FROM automation_health WHERE id=1');
+  return {last_run_at:health?.last_run_at||null,healthy:Boolean(health?.last_run_at && Date.now()-new Date(health.last_run_at).getTime()<15*60_000),
+    inbound:all(`SELECT j.status,COUNT(*) AS count FROM inbound_agent_jobs j JOIN conversations c ON c.id=j.conversation_id
+      JOIN contacts ct ON ct.id=c.contact_id WHERE ct.company_id=? GROUP BY j.status`,[companyId]),
+    scheduled:all(`SELECT sm.status,COUNT(*) AS count FROM scheduled_messages sm JOIN conversations c ON c.id=sm.conversation_id
+      JOIN contacts ct ON ct.id=c.contact_id WHERE ct.company_id=? GROUP BY sm.status`,[companyId]),
+    failures:all(`SELECT 'inbound' AS kind,j.message_id AS id,ct.name,j.error FROM inbound_agent_jobs j JOIN conversations c ON c.id=j.conversation_id JOIN contacts ct ON ct.id=c.contact_id WHERE ct.company_id=? AND j.status='failed'
+      UNION ALL SELECT 'scheduled',sm.id,ct.name,sm.last_error FROM scheduled_messages sm JOIN conversations c ON c.id=sm.conversation_id JOIN contacts ct ON ct.id=c.contact_id WHERE ct.company_id=? AND sm.status='failed' LIMIT 20`,[companyId,companyId])};
 }
 
 function createInbound({ phone, name, content, whatsappId, externalId, timestamp = now(), type = 'text', profilePictureUrl = null, audioData = null, companyId = 1 }) {
   if (!phone || !content) throw Object.assign(new Error('Telefone e mensagem são obrigatórios'), { statusCode: 400 });
+  const optedOut=/^(?:pare|parar|sair|stop|cancelar mensagens)$|n[aã]o (?:quero|desejo) (?:mais )?receber|pare de (?:me )?enviar/i.test(String(content).trim());
   phone = normalizedPhone(phone);
+  const windowUntil=new Date(Math.min(Date.now(),new Date(timestamp).getTime())+24*3_600_000).toISOString();
   const phoneDigits = phone.replace(/\D/g, '');
   let contact = get(`SELECT * FROM contacts WHERE company_id=? AND (whatsapp_id=? OR replace(replace(replace(replace(replace(phone,'+',''),' ',''),'-',''),'(',''),')','')=?) LIMIT 1`, [companyId, whatsappId || phoneDigits, phoneDigits]);
   if (!contact) {
     const result = run(`INSERT INTO contacts (company_id, phone, whatsapp_id, name, consent_status, last_seen_at, profile_picture_url)
-      VALUES (?, ?, ?, ?, 'granted', ?, ?)`, [companyId, phone, whatsappId || phoneDigits, name || 'Novo contato', timestamp, profilePictureUrl]);
+      VALUES (?, ?, ?, ?, 'unknown', ?, ?)`, [companyId, phone, whatsappId || phoneDigits, name || 'Novo contato', timestamp, profilePictureUrl]);
     contact = get('SELECT * FROM contacts WHERE id=?', [Number(result.lastInsertRowid)]);
   } else {
     run(`UPDATE contacts SET name=CASE WHEN name='Novo contato' THEN ? ELSE name END,
       whatsapp_id=COALESCE(whatsapp_id, ?), profile_picture_url=COALESCE(?,profile_picture_url), last_seen_at=?, updated_at=? WHERE id=?`,
     [name || contact.name, whatsappId || phoneDigits, profilePictureUrl, timestamp, now(), contact.id]);
   }
+  if(optedOut)run("UPDATE contacts SET consent_status='revoked',updated_at=? WHERE id=?",[now(),contact.id]);
 
   let conversation = get(`SELECT * FROM conversations WHERE contact_id=? AND status!='closed' ORDER BY id DESC LIMIT 1`, [contact.id]);
   if (!conversation) {
     const owner = existingLeadOwner(contact.id,companyId) || nextLeadOwner(companyId);
     const result = run(`INSERT INTO conversations
       (contact_id, assigned_to, status, mode, customer_window_until, unread_count, last_message_at)
-      VALUES (?, ?, 'open', 'autopilot', ?, 1, ?)`, [contact.id, owner?.id, new Date(Date.now() + 24 * 3_600_000).toISOString(), timestamp]);
+      VALUES (?, ?, 'open', 'autopilot', ?, 1, ?)`, [contact.id, owner?.id||null, windowUntil, timestamp]);
     conversation = get('SELECT * FROM conversations WHERE id=?', [Number(result.lastInsertRowid)]);
   }
 
-  const duplicate = externalId ? get('SELECT id FROM messages WHERE whatsapp_message_id=?', [externalId]) : null;
-  if (duplicate) return { conversation, contact, messageId: duplicate.id, duplicate: true };
+  const duplicate = externalId ? get('SELECT id,conversation_id FROM messages WHERE whatsapp_message_id=?', [externalId]) : null;
+  if (duplicate) {
+    if(duplicate.conversation_id!==conversation.id)throw Object.assign(new Error('Identificador de mensagem já associado a outra conversa.'),{statusCode:409});
+    queueInboundMessage(conversation.id,duplicate.id);
+    return { conversation, contact, messageId: duplicate.id, duplicate: true };
+  }
   const result = run(`INSERT INTO messages
     (conversation_id, whatsapp_message_id, direction, sender_type, type, content, status, created_at)
     VALUES (?, ?, 'inbound', 'contact', ?, ?, 'received', ?)`,
   [conversation.id, externalId || `sim-${Date.now()}`, type, content, timestamp]);
-  if (audioData) run('UPDATE messages SET metadata=? WHERE id=?', [JSON.stringify({ audio_data: audioData, transcribed: true }), Number(result.lastInsertRowid)]);
+  if (audioData) run('UPDATE messages SET metadata=? WHERE id=?', [JSON.stringify({ audio_data: audioData, transcribed: !content.startsWith('[Áudio sem transcrição]') }), Number(result.lastInsertRowid)]);
   run(`UPDATE conversations SET status='open', unread_count=unread_count+1,
     customer_window_until=?, last_message_at=?, updated_at=? WHERE id=?`,
-  [new Date(Date.now() + 24 * 3_600_000).toISOString(), timestamp, now(), conversation.id]);
+  [windowUntil, timestamp, now(), conversation.id]);
   stopCadencesForContact(companyId,contact.id,'reply_received',true);
+  run("UPDATE scheduled_messages SET status='cancelled' WHERE conversation_id=? AND status='scheduled' AND claimed_at IS NULL AND json_extract(payload,'$.automatic')=1",[conversation.id]);
   return { conversation, contact, messageId: Number(result.lastInsertRowid), duplicate: false };
 }
 
@@ -361,9 +409,10 @@ async function processWebhook(payload) {
       outcomes.push({ kind: 'status', id: event.externalId, status: mapped });
       continue;
     }
-    let media=null;if(event.mediaId&&event.type==='audio')media=await downloadWhatsAppMedia(event.mediaId,companyId);
+    if(previouslyReceived(event,companyId)){outcomes.push({kind:'duplicate',id:event.externalId});continue;}
+    let media=null;if(event.mediaId&&event.type==='audio')try{media=await downloadWhatsAppMedia(event.mediaId,companyId);}catch{}
     const audioBase64=media?.base64||event.audioBase64;const audioMimeType=media?.mimeType||event.audioMimeType;
-    const audioContent = audioBase64 ? await transcribeAudio(audioBase64, audioMimeType) : event.content;
+    const audioContent = await inboundAudioText(audioBase64,audioMimeType,event.type==='audio'&&!audioBase64?'[Áudio sem transcrição] A equipe deve ouvir esta mensagem no WhatsApp.':event.content);
     const incoming = createInbound({
       phone: `+${event.from}`,
       whatsappId: event.from,
@@ -377,7 +426,8 @@ async function processWebhook(payload) {
       companyId
     });
     if (!incoming.duplicate) {
-      const result = await processInboundMessage(incoming.conversation.id, incoming.messageId);
+      queueInboundMessage(incoming.conversation.id,incoming.messageId);
+      const result = await processPendingInboundMessages(companyId,incoming.messageId);
       outcomes.push({ kind: 'message', conversationId: incoming.conversation.id, agent: result });
     }
   }
@@ -458,7 +508,8 @@ async function processEvolutionWebhook(payload, companyId = 1) {
       outcomes.push({ kind: 'status', id: event.externalId, status: mapped });
       continue;
     }
-    const audioContent = event.audioBase64 ? await transcribeAudio(event.audioBase64, event.audioMimeType) : event.content;
+    if(previouslyReceived(event,companyId)){outcomes.push({kind:'duplicate',id:event.externalId});continue;}
+    const audioContent = await inboundAudioText(event.audioBase64,event.audioMimeType,event.type==='audio'&&!event.audioBase64?'[Áudio sem transcrição] A equipe deve ouvir esta mensagem no WhatsApp.':event.content);
     const incoming = createInbound({
       phone: `+${event.from}`,
       whatsappId: event.from,
@@ -472,7 +523,8 @@ async function processEvolutionWebhook(payload, companyId = 1) {
       ,companyId
     });
     if (!incoming.duplicate) {
-      const result = await processInboundMessage(incoming.conversation.id, incoming.messageId);
+      queueInboundMessage(incoming.conversation.id,incoming.messageId);
+      const result = await processPendingInboundMessages(companyId,incoming.messageId);
       outcomes.push({ kind: 'message', conversationId: incoming.conversation.id, agent: result });
     }
   }
@@ -523,7 +575,26 @@ export async function routeApi(request, response, url, body, context) {
     return { accepted: true, email: invitation.email };
   }
 
-  if (method === 'GET' && path === '/api/health') return { status: 'ok', database: 'connected', whatsapp: Boolean(process.env.WHATSAPP_ACCESS_TOKEN), ai: agentModelStatus().configured, aiModel: agentModelStatus().model, time: now() };
+  if (method === 'GET' && path === '/api/health') return { status: 'ok', database: 'connected', whatsapp: whatsappDeliveryStatus(context?.user?.companyId||1), ai: agentModelStatus().configured, aiModel: agentModelStatus().model, time: now() };
+  if (method === 'GET' && path === '/api/automations/status') return automationStatus(context.user.companyId);
+  const retryAutomation=path.match(/^\/api\/automations\/(inbound|scheduled)\/(\d+)\/retry$/);
+  if(method==='POST'&&retryAutomation){
+    requireRole(context,['admin','manager']);
+    if(body?.reviewed_delivery!==true)throw Object.assign(new Error('Confira no WhatsApp se já houve envio antes de autorizar uma nova tentativa.'),{statusCode:400});
+    const id=parseId(retryAutomation[2]);
+    if(retryAutomation[1]==='inbound'){
+      const item=get(`SELECT j.* FROM inbound_agent_jobs j JOIN conversations c ON c.id=j.conversation_id JOIN contacts ct ON ct.id=c.contact_id WHERE j.message_id=? AND ct.company_id=? AND j.status='failed'`,[id,context.user.companyId]);
+      if(!item)throw Object.assign(new Error('Falha não encontrada nesta empresa.'),{statusCode:404});
+      run("UPDATE inbound_agent_jobs SET status='pending',attempts=0,claimed_at=NULL,error=NULL,next_attempt_at=?,updated_at=? WHERE message_id=?",[now(),now(),id]);
+      run("UPDATE conversations SET mode='autopilot',updated_at=? WHERE id=?",[now(),item.conversation_id]);
+    }else{
+      const item=get(`SELECT sm.id FROM scheduled_messages sm JOIN conversations c ON c.id=sm.conversation_id JOIN contacts ct ON ct.id=c.contact_id WHERE sm.id=? AND ct.company_id=? AND sm.status='failed'`,[id,context.user.companyId]);
+      if(!item)throw Object.assign(new Error('Falha não encontrada nesta empresa.'),{statusCode:404});
+      run("UPDATE scheduled_messages SET status='scheduled',attempts=0,claimed_at=NULL,last_error=NULL,send_at=? WHERE id=?",[now(),id]);
+    }
+    run("INSERT INTO security_events(user_id,event_type,details) VALUES (?,'automation_retry_reviewed',?)",[context.user.id,JSON.stringify({kind:retryAutomation[1],id,company_id:context.user.companyId})]);
+    return {queued:true};
+  }
   if (method === 'GET' && path === '/api/dashboard') return dashboard(url, context.user.companyId);
   if (method === 'GET' && path === '/api/dashboard/preferences') {
     return asJson(get('SELECT value FROM settings WHERE key=?', [`dashboard:${context.user.id}`])?.value, { cards: ['new_contacts', 'open_conversations', 'unanswered_conversations', 'response_minutes', 'pipeline_value'] });
@@ -564,12 +635,22 @@ export async function routeApi(request, response, url, body, context) {
     const created=[];
     for(const entry of items){
       const kind=['followup','reminder','calendar'].includes(entry.kind)?entry.kind:'followup';
-      const content=String(entry.content||'').trim().slice(0,4000);const date=new Date(entry.send_at);
+      let content=String(entry.content||'').trim().slice(0,4000);const date=new Date(entry.send_at);
       if(!content)throw Object.assign(new Error('Preencha a mensagem ou descrição de cada item.'),{statusCode:400});
       if(Number.isNaN(date.getTime())||date.getTime()<Date.now()+30_000)throw Object.assign(new Error('Escolha uma data futura para todos os itens.'),{statusCode:400});
       const sendAt=date.toISOString();
       if(kind==='followup'){
-        const result=run(`INSERT INTO scheduled_messages(conversation_id,send_at,payload,status) VALUES (?,?,?,'scheduled')`,[id,sendAt,JSON.stringify({kind,content,created_by:context.user.id})]);
+        const templateId=entry.template_id?parseId(entry.template_id):null;
+        const template=templateId?get("SELECT * FROM message_templates WHERE id=? AND company_id=? AND source='meta' AND status='approved'",[templateId,context.user.companyId]):null;
+        if(templateId&&!template)throw Object.assign(new Error('Modelo aprovado não encontrado nesta empresa.'),{statusCode:400});
+        const variables=Array.isArray(entry.variables)?entry.variables.map(value=>String(value).trim()).slice(0,20):[];
+        if(template){
+          const count=Math.max(0,...[...template.body.matchAll(/\{\{\s*(\d+)\s*\}\}/g)].map(match=>Number(match[1])));
+          if(variables.length!==count||variables.some(value=>!value||value.length>1024))throw Object.assign(new Error(`Informe ${count} valor(es) para as variáveis deste modelo.`),{statusCode:400});
+          content=template.body.replace(/\{\{\s*(\d+)\s*\}\}/g,(_,number)=>variables[Number(number)-1]);
+        }
+        if(!templateId&&metaIsConfigured(context.user.companyId)&&!customerWindowIsOpen(conversation.customer_window_until,date.getTime()))throw Object.assign(new Error('Este horário está fora da janela de atendimento. Selecione um modelo aprovado.'),{statusCode:400});
+        const result=run(`INSERT INTO scheduled_messages(conversation_id,template_id,send_at,payload,status) VALUES (?,?,?,?,'scheduled')`,[id,templateId,sendAt,JSON.stringify({kind,content,variables,created_by:context.user.id})]);
         created.push({kind,id:Number(result.lastInsertRowid),send_at:sendAt,content,status:'scheduled'});
       }else{
         const result=run(`INSERT INTO tasks(company_id,contact_id,conversation_id,assigned_to,title,description,due_at,type,priority,created_by)
@@ -604,7 +685,7 @@ export async function routeApi(request, response, url, body, context) {
   match = path.match(/^\/api\/conversations\/(\d+)\/audio$/);
   if (method === 'POST' && match) {
     const id=parseId(match[1]); const conversation=getConversation(id, context.user.companyId); const encoded=String(body?.data_base64||''); if(!encoded||encoded.length>2_600_000)throw Object.assign(new Error('O áudio deve ter no máximo 1,8 MB.'),{statusCode:400});
-    const transcript=await transcribeAudio(encoded,String(body?.mime_type||'audio/webm')); const sendResult=await sendWhatsAppAudio(conversation.phone.replace(/\D/g,''),encoded,context.user.companyId);
+    const transcript=await transcribeAudio(encoded,String(body?.mime_type||'audio/webm')); const sendResult=await sendWhatsAppAudio(conversation.phone.replace(/\D/g,''),encoded,context.user.companyId,String(body?.mime_type||'audio/ogg'));
     const result=run(`INSERT INTO messages (conversation_id,whatsapp_message_id,direction,sender_type,sender_id,type,content,status,metadata) VALUES (?,?,'outbound','human',?,'audio',?,?,?)`,[id,sendResult.id,context.user.id,transcript,sendResult.status,JSON.stringify({transcribed:true,mime_type:body?.mime_type,simulated:sendResult.simulated,audio_data:`data:${body?.mime_type||'audio/webm'};base64,${encoded}`})]); run(`UPDATE conversations SET mode='human',unread_count=0,last_message_at=?,updated_at=? WHERE id=?`,[now(),now(),id]); return {id:Number(result.lastInsertRowid),transcript,...sendResult};
   }
 
@@ -1025,12 +1106,15 @@ export async function routeApi(request, response, url, body, context) {
 
   if (method === 'GET' && path === '/api/agent/config') {
     const config = companyAgentConfig(context.user.companyId);
-    return { ...config, handoff_rules: asJson(config.handoff_rules, []), followup_rules: asJson(config.followup_rules, {}), business_hours: asJson(config.business_hours, {}), model_status: agentModelStatus() };
+    return { ...config, handoff_rules: asJson(config.handoff_rules, []), followup_rules: asJson(config.followup_rules, {}), business_hours: asJson(config.business_hours, {}), model_status: agentModelStatus(), automation_status:automationStatus(context.user.companyId), whatsapp_status:whatsappDeliveryStatus(context.user.companyId), followup_templates:approvedTemplates(context.user.companyId).filter(item=>item.source==='meta') };
   }
   if (method === 'PUT' && path === '/api/agent/config') {
     requireRole(context, ['admin', 'manager']);
-    const fields = ['name', 'company_name', 'tone', 'objective', 'autonomy_level', 'confidence_threshold', 'max_tool_steps'];
-    const entries = Object.entries(body || {}).filter(([key]) => fields.includes(key));
+    const validated=validateAgentConfig(body||{});
+    const followups=validated.followup_rules?JSON.parse(validated.followup_rules):null;
+    if(followups?.template_id && !get("SELECT id FROM message_templates WHERE id=? AND company_id=? AND source='meta' AND status='approved'",[followups.template_id,context.user.companyId]))throw Object.assign(new Error('Escolha um modelo aprovado desta empresa.'),{statusCode:400});
+    if(followups?.template_id && /\{\{/.test(get('SELECT body FROM message_templates WHERE id=?',[followups.template_id]).body))throw Object.assign(new Error('Para retomadas automáticas, escolha um modelo aprovado sem variáveis.'),{statusCode:400});
+    const entries = Object.entries(validated);
     ensureCompanyAgentConfig(context.user.companyId);
     if (entries.length) run(`UPDATE company_agent_config SET ${entries.map(([key]) => `${key}=?`).join(', ')}, updated_at=? WHERE company_id=?`, [...entries.map(([, value]) => value), now(), context.user.companyId]);
     return companyAgentConfig(context.user.companyId);

@@ -5,7 +5,7 @@ import { extname, join, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { processScheduledMessages, routeApi } from './src/api.js';
 import { seed } from './src/seed.js';
-import { verifyChallenge, verifySignature } from './src/whatsapp.js';
+import { verifyChallenge, verifySignature, whatsappDeliveryStatus } from './src/whatsapp.js';
 import { authenticate, clearCookie, ensureAdminCredentials, login, logout, promoteConfiguredMasters, refreshCookie } from './src/auth.js';
 import { completeMetaAuthorization, metaIsConfigured, metaOauthStatus, verifyMetaLeadChallenge, verifyMetaLeadSignature } from './src/integrations.js';
 import { recalculateQualifications } from './src/qualification.js';
@@ -169,7 +169,7 @@ async function handleRequest(request, response) {
         if(!secret)return sendJson(response,503,{error:'Executor de agendamentos não configurado.'});
         if(request.headers.authorization!==`Bearer ${secret}`)return sendJson(response,401,{error:'Executor não autorizado.'});
         const result=await processScheduledMessages();
-        if(result.processed)await persistDatabaseSnapshot(databasePath,db);
+        await persistDatabaseSnapshot(databasePath,db);
         return sendJson(response,200,result);
       }
 
@@ -206,7 +206,8 @@ async function handleRequest(request, response) {
           status: 'ok',
           demo: process.env.NODE_ENV !== 'production',
           authenticated: Boolean(auth),
-          whatsapp: officialReady,
+          whatsapp: official,
+          whatsappDelivery: whatsappDeliveryStatus(companyId),
           whatsappProvider: officialReady ? 'meta_cloud_api' : null,
           whatsappReachable: officialReady,
           whatsappConnected: official,

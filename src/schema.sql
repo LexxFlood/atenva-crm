@@ -457,6 +457,24 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS inbound_agent_jobs (
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','processing','completed','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  claimed_at TEXT,
+  error TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_due ON inbound_agent_jobs(status,next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS automation_health (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  last_run_at TEXT,
+  result TEXT NOT NULL DEFAULT '{}'
+);
+
 CREATE TABLE IF NOT EXISTS contact_attribution_events (
   id INTEGER PRIMARY KEY,
   company_id INTEGER NOT NULL REFERENCES company_profiles(id) ON DELETE CASCADE,
@@ -649,6 +667,7 @@ CREATE TABLE IF NOT EXISTS company_qualification_config (
   mql_min_score INTEGER NOT NULL DEFAULT 55 CHECK (mql_min_score BETWEEN 0 AND 100),
   sql_min_score INTEGER NOT NULL DEFAULT 80 CHECK (sql_min_score BETWEEN 0 AND 100),
   required_fields TEXT NOT NULL DEFAULT '["phone","company"]',
+  sql_required_fields TEXT NOT NULL DEFAULT '["need","timeframe","decision_role"]',
   auto_move INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

@@ -1,0 +1,25 @@
+name: Processar automações do CRM
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: crm-automations
+  cancel-in-progress: false
+jobs:
+  process:
+    if: ${{ vars.CRM_AUTOMATIONS_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Processar mensagens e cadências
+        env:
+          CRON_PUBLIC_URL: ${{ secrets.CRON_PUBLIC_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: node scripts/run-automations.mjs --once

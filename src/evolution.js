@@ -206,9 +206,10 @@ export async function sendEvolutionText(to, text, companyId = 1) {
     method: 'POST',
     body: { number: String(to).replace(/\D/g, ''), text }
   }, companyId);
+  if(!payload?.key?.id && !payload?.messageId && !payload?.id)throw Object.assign(new Error('A Evolution não confirmou o identificador da mensagem. Confira o envio antes de tentar novamente.'),{code:'DELIVERY_UNKNOWN',retryable:false});
   return {
     simulated: false,
-    id: payload?.key?.id || payload?.messageId || payload?.id || `evolution-${Date.now()}`,
+    id: payload?.key?.id || payload?.messageId || payload?.id,
     status: 'sent',
     raw: payload
   };
@@ -220,9 +221,10 @@ export async function sendEvolutionAudio(to, audioBase64, companyId = 1) {
     method: 'POST',
     body: { number: String(to).replace(/\D/g, ''), audio: String(audioBase64).replace(/^data:[^;]+;base64,/, ''), encoding: true }
   }, companyId);
+  if(!payload?.key?.id && !payload?.messageId && !payload?.id)throw Object.assign(new Error('A Evolution não confirmou o identificador do áudio. Confira o envio antes de tentar novamente.'),{code:'DELIVERY_UNKNOWN',retryable:false});
   return {
     simulated: false,
-    id: payload?.key?.id || payload?.messageId || payload?.id || `evolution-audio-${Date.now()}`,
+    id: payload?.key?.id || payload?.messageId || payload?.id,
     status: 'sent',
     raw: payload
   };
